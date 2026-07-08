@@ -17,3 +17,31 @@
 [x-cloak] {
   display: none !important;
 }
+
+/*
+ * Visual star rating. A single row of five ★ glyphs whose fill is clipped to
+ * `--rating / 5`, so the same component handles whole ratings and fractional
+ * averages. Filled portion uses amber; the remainder falls back to the muted
+ * foreground token.
+ */
+.star-rating {
+  --pct: calc(var(--rating) / 5 * 100%);
+  display: inline-block;
+  font-size: 1rem;
+  line-height: 1;
+  letter-spacing: 0.1em;
+  background: linear-gradient(
+    90deg,
+    var(--color-star, #f59e0b) var(--pct),
+    var(--color-muted-foreground) var(--pct)
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.star-rating::before {
+  content: "★★★★★";
+}
+.star-rating.is-muted {
+  opacity: 0.55;
+}

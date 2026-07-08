@@ -16,11 +16,7 @@
       <dt class="text-muted-foreground">Format</dt>
       <dd>{% if book["format"] %}<span class="badge">{{ book["format"] | capitalize }}</span>{% else %}<span class="badge-outline">not owned</span>{% endif %}</dd>
       <dt class="text-muted-foreground">Tags</dt>
-      <dd class="flex flex-wrap gap-1">
-        {% for tag in book.tags %}
-        <a href="/?tag={{ tag | urlencode }}" class="badge-secondary hover:underline">{{ tag }}</a>
-        {% else %}—{% endfor %}
-      </dd>
+      {% include "_local_tags.html" %}
       <dt class="text-muted-foreground">Loaned to</dt><dd>{{ book.loaned_to or "—" }}</dd>
       <dt class="text-muted-foreground">Local notes</dt><dd class="whitespace-pre-line">{{ book.local_notes or "—" }}</dd>
     </dl>

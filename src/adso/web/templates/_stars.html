@@ -1,0 +1,7 @@
+{# Display-only star rating. `value` is 0–5 (int or float); fill is clipped to
+   value/5 by the .star-rating CSS. Pass muted=True to dim it (e.g. community
+   averages, which sit visually below your own rating). #}
+{% macro stars(value, muted=False) -%}
+<span class="star-rating{% if muted %} is-muted{% endif %}" style="--rating: {{ value }}"
+      role="img" aria-label="{{ value }} out of 5 stars"></span>
+{%- endmacro %}

@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_stars.html" import stars %}
 {% block title %}Adso · {{ book.title }}{% endblock %}
 {% block content %}
 <a href="/" class="text-sm text-muted-foreground hover:text-foreground">← Catalogue</a>
@@ -73,8 +74,10 @@
         <dt class="text-muted-foreground">Reading status</dt><dd>{{ book.reading_status or "—" }}</dd>
         <dt class="text-muted-foreground">Shelf</dt><dd>{{ book.exclusive_shelf or "—" }}</dd>
         <dt class="text-muted-foreground">Shelves</dt><dd>{{ book.shelves | join(", ") if book.shelves else "—" }}</dd>
-        <dt class="text-muted-foreground">My rating</dt><dd>{{ book.rating if book.rating is not none else "—" }}</dd>
-        <dt class="text-muted-foreground">Average</dt><dd>{{ book.average_rating or "—" }}</dd>
+        <dt class="text-muted-foreground">My rating</dt>
+        <dd>{% if book.rating is not none and book.rating %}<span class="inline-flex items-center gap-2">{{ stars(book.rating) }}<span class="text-muted-foreground">{{ book.rating }}</span></span>{% else %}—{% endif %}</dd>
+        <dt class="text-muted-foreground">Average</dt>
+        <dd>{% if book.average_rating %}<span class="inline-flex items-center gap-2">{{ stars(book.average_rating, muted=True) }}<span class="text-muted-foreground">{{ book.average_rating }}</span></span>{% else %}—{% endif %}</dd>
         <dt class="text-muted-foreground">Date read</dt><dd>{{ book.date_read or "—" }}</dd>
         <dt class="text-muted-foreground">Date added</dt><dd>{{ book.date_added or "—" }}</dd>
         <dt class="text-muted-foreground">Review</dt><dd class="whitespace-pre-line">{{ book.my_review or "—" }}</dd>

@@ -1,0 +1,22 @@
+{# Personal tags as directly-editable chips. Each chip's × removes it; the
+   trailing input adds one. Both swap this whole <dd> in place via HTMX. #}
+<dd id="local-tags" class="flex flex-wrap items-center gap-1">
+  {% for tag in book.tags %}
+  <span class="badge-secondary inline-flex items-center gap-1">
+    <a href="/?tag={{ tag | urlencode }}" class="hover:underline">{{ tag }}</a>
+    <button type="button" aria-label="Remove {{ tag }}"
+            hx-post="/book/{{ book.goodreads_id }}/tags/remove"
+            hx-vals='{"tag": {{ tag | tojson }}}'
+            hx-target="#local-tags" hx-swap="outerHTML"
+            class="leading-none opacity-60 hover:opacity-100">×</button>
+  </span>
+  {% else %}
+  <span class="text-muted-foreground">—</span>
+  {% endfor %}
+  <form class="inline-flex" hx-post="/book/{{ book.goodreads_id }}/tags/add"
+        hx-target="#local-tags" hx-swap="outerHTML"
+        hx-on::after-request="this.reset()">
+    <input class="input h-6 w-28 text-xs" type="text" name="tag"
+           placeholder="+ add tag" autocomplete="off">
+  </form>
+</dd>

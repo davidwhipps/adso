@@ -233,20 +233,20 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         goodreads_id: str,
         conn: sqlite3.Connection = Depends(get_conn),
         format: str | None = Form(None),
-        tags: str | None = Form(None),
         loaned_to: str | None = Form(None),
         local_notes: str | None = Form(None),
     ) -> HTMLResponse:
         # These are all LOCAL_FIELDS, which sync never touches, so editing them is
         # always safe — db.update_local_fields enforces that boundary (including
-        # rejecting unknown format values).
+        # rejecting unknown format values). Tags are edited inline via the
+        # /tags/add and /tags/remove endpoints, so this form deliberately leaves
+        # tags_json untouched.
         def _clean(value: str | None) -> str | None:
             value = (value or "").strip()
             return value or None
 
         updates = {
             "format": _clean(format),
-            "tags_json": db.normalize_tags(tags),
             "loaned_to": _clean(loaned_to),
             "local_notes": (local_notes or "").strip() or None,
         }
@@ -255,6 +255,49 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         except ValueError as exc:
             return _local_card(request, conn, goodreads_id, editing=True, error=str(exc))
         return _local_card(request, conn, goodreads_id, saved=True)
+
+    def _tags_fragment(
+        request: Request,
+        conn: sqlite3.Connection,
+        goodreads_id: str,
+    ) -> HTMLResponse:
+        """Re-render just the editable tag chips (the Tags <dd>)."""
+        book = get_book(conn, goodreads_id)
+        if book is None:
+            raise HTTPException(status_code=404, detail=f"No book for Goodreads ID {goodreads_id}")
+        return templates.TemplateResponse(request, "_local_tags.html", {"book": book})
+
+    @app.post("/book/{goodreads_id}/tags/add", response_class=HTMLResponse)
+    def tag_add(
+        request: Request,
+        goodreads_id: str,
+        conn: sqlite3.Connection = Depends(get_conn),
+        tag: str | None = Form(None),
+    ) -> HTMLResponse:
+        book = get_book(conn, goodreads_id)
+        if book is None:
+            raise HTTPException(status_code=404, detail=f"No book for Goodreads ID {goodreads_id}")
+        # Append the raw input; update_local_fields runs normalize_tags, which
+        # lowercases, trims, and dedupes — so a blank or duplicate is a no-op.
+        db.update_local_fields(conn, goodreads_id, {"tags_json": [*book["tags"], tag or ""]})
+        return _tags_fragment(request, conn, goodreads_id)
+
+    @app.post("/book/{goodreads_id}/tags/remove", response_class=HTMLResponse)
+    def tag_remove(
+        request: Request,
+        goodreads_id: str,
+        conn: sqlite3.Connection = Depends(get_conn),
+        tag: str = Form(...),
+    ) -> HTMLResponse:
+        book = get_book(conn, goodreads_id)
+        if book is None:
+            raise HTTPException(status_code=404, detail=f"No book for Goodreads ID {goodreads_id}")
+        # Normalise the incoming tag the same way stored tags are, so the match is
+        # case/whitespace-insensitive.
+        target = db.normalize_tags(tag)
+        remaining = [t for t in book["tags"] if [t] != target]
+        db.update_local_fields(conn, goodreads_id, {"tags_json": remaining})
+        return _tags_fragment(request, conn, goodreads_id)
 
     @app.get("/covers/{goodreads_id}")
     def cover(

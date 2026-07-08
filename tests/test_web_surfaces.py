@@ -136,29 +136,61 @@ class BookLocalEditWebTests(unittest.TestCase):
         self.assertIn("/book/1/local/edit", body)
         self.assertIn("never synced to Goodreads", body)
 
+    def _tags(self) -> str:
+        conn = db.connect(self.db_path)
+        value = db.get_book_by_goodreads_id(conn, "1")["tags_json"]
+        conn.close()
+        return value
+
     def test_edit_form_renders_all_fields(self) -> None:
+        # Tags are edited inline (see tag add/remove), not via this form.
         body = self.client.get("/book/1/local/edit").text
-        for name in ("format", "tags", "loaned_to", "local_notes"):
+        for name in ("format", "loaned_to", "local_notes"):
             self.assertIn(f'name="{name}"', body)
+        self.assertNotIn('name="tags"', body)
         for value in ("physical", "ebook", "audiobook"):
             self.assertIn(f'value="{value}"', body)
 
     def test_save_updates_local_fields_and_confirms(self) -> None:
         body = self.client.post(
             "/book/1/local",
-            data={"format": "ebook", "tags": "Philosophy, medieval",
-                  "loaned_to": "Sam", "local_notes": "Signed"},
+            data={"format": "ebook", "loaned_to": "Sam", "local_notes": "Signed"},
         ).text
         self.assertIn("Saved", body)
         self.assertIn("Ebook", body)
-        self.assertIn("philosophy", body)
         conn = db.connect(self.db_path)
         book = db.get_book_by_goodreads_id(conn, "1")
         self.assertEqual(
-            (book["format"], book["tags_json"], book["loaned_to"], book["local_notes"]),
-            ("ebook", '["philosophy", "medieval"]', "Sam", "Signed"),
+            (book["format"], book["loaned_to"], book["local_notes"]),
+            ("ebook", "Sam", "Signed"),
         )
         conn.close()
+
+    def test_save_local_fields_leaves_tags_untouched(self) -> None:
+        self.client.post("/book/1/tags/add", data={"tag": "Philosophy"})
+        self.client.post("/book/1/local", data={"format": "ebook", "local_notes": "x"})
+        self.assertEqual(self._tags(), '["philosophy"]')
+
+    def test_tag_add_appends_and_normalises(self) -> None:
+        body = self.client.post("/book/1/tags/add", data={"tag": "Philosophy"}).text
+        self.assertIn("philosophy", body)
+        self.assertEqual(self._tags(), '["philosophy"]')
+
+    def test_tag_add_dedupes_case_insensitively(self) -> None:
+        self.client.post("/book/1/tags/add", data={"tag": "medieval"})
+        self.client.post("/book/1/tags/add", data={"tag": "Medieval"})
+        self.assertEqual(self._tags(), '["medieval"]')
+
+    def test_tag_add_blank_is_noop(self) -> None:
+        self.client.post("/book/1/tags/add", data={"tag": "   "})
+        self.assertEqual(self._tags(), "[]")
+
+    def test_tag_remove_drops_matching_tag(self) -> None:
+        self.client.post("/book/1/tags/add", data={"tag": "philosophy"})
+        self.client.post("/book/1/tags/add", data={"tag": "medieval"})
+        body = self.client.post("/book/1/tags/remove", data={"tag": "Philosophy"}).text
+        self.assertNotIn(">philosophy<", body)
+        self.assertEqual(self._tags(), '["medieval"]')
 
     def test_empty_format_clears_to_not_owned(self) -> None:
         self.client.post("/book/1/local", data={"format": "physical"})

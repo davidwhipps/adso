@@ -20,11 +20,6 @@
         </select>
       </label>
       <label class="grid gap-1">
-        <span class="text-muted-foreground">Tags</span>
-        <input class="input" type="text" name="tags" value="{{ book.tags | join(', ') }}"
-               placeholder="philosophy, medieval, …">
-      </label>
-      <label class="grid gap-1">
         <span class="text-muted-foreground">Loaned to</span>
         <input class="input" type="text" name="loaned_to" value="{{ book.loaned_to or '' }}">
       </label>
