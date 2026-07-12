@@ -20,6 +20,8 @@ class BookFilters:
     format: str | None = None
     tag: str | None = None
     author: str | None = None
+    shelf: str | None = None
+    rating: int | None = None
     limit: int | None = None
 
 
@@ -187,6 +189,17 @@ def _filter_sql(filters: BookFilters, table_prefix: str | None = None) -> tuple[
         )
         author_query = f"%{filters.author}%"
         params.extend([author_query, author_query])
+    if filters.shelf:
+        clauses.append(f"{prefix}exclusive_shelf = ? COLLATE NOCASE")
+        params.append(filters.shelf.strip())
+    if filters.rating is not None:
+        if filters.rating == 0:
+            # Goodreads exports unrated as 0, but an empty "My Rating" cell
+            # parses to NULL; both mean unrated.
+            clauses.append(f"({prefix}rating = 0 OR {prefix}rating IS NULL)")
+        else:
+            clauses.append(f"{prefix}rating = ?")
+            params.append(filters.rating)
 
     if not clauses:
         return "", params

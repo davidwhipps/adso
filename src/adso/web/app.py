@@ -123,6 +123,7 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         format: str | None,
         tag: str | None,
         author: str | None,
+        rating: int | None,
         limit: int | None,
     ) -> BookFilters:
         return BookFilters(
@@ -130,6 +131,7 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
             format=format if format in db.VALID_FORMATS else None,
             tag=(tag or "").strip() or None,
             author=author or None,
+            rating=rating,
             limit=limit,
         )
 
@@ -151,9 +153,10 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         format: str | None = Query(None),
         tag: str | None = Query(None),
         author: str | None = Query(None),
+        rating: int | None = Query(None, ge=0, le=5),
         limit: int | None = Query(None, ge=1),
     ) -> HTMLResponse:
-        filters = _filters(status, format, tag, author, limit)
+        filters = _filters(status, format, tag, author, rating, limit)
         books = _query_books(conn, q, filters)
         return templates.TemplateResponse(
             request,
@@ -165,6 +168,7 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
                 "format": format or "",
                 "tag": tag or "",
                 "author": author or "",
+                "rating": "" if rating is None else str(rating),
                 "statuses": distinct_statuses(conn),
                 "formats": db.VALID_FORMATS,
                 "tags": distinct_tags(conn),
@@ -327,9 +331,10 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         format: str | None = Query(None),
         tag: str | None = Query(None),
         author: str | None = Query(None),
+        rating: int | None = Query(None, ge=0, le=5),
         limit: int | None = Query(None, ge=1),
     ) -> dict:
-        filters = _filters(status, format, tag, author, limit)
+        filters = _filters(status, format, tag, author, rating, limit)
         books = _query_books(conn, q, filters)
         return {"count": len(books), "books": books}
 

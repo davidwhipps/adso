@@ -611,6 +611,7 @@ class AdsoCoreTests(unittest.TestCase):
                         "Author": "Ursula K. Le Guin",
                         "Exclusive Shelf": "read",
                         "Bookshelves": "read, fiction",
+                        "My Rating": "5",
                     }
                 ),
                 row(
@@ -620,6 +621,16 @@ class AdsoCoreTests(unittest.TestCase):
                         "Author": "Virginia Woolf",
                         "Exclusive Shelf": "currently-reading",
                         "Bookshelves": "currently-reading, essays",
+                    }
+                ),
+                row(
+                    **{
+                        "Book Id": "4",
+                        "Title": "Zen in the Art of Archery",
+                        "Author": "Eugen Herrigel",
+                        # An empty "My Rating" cell parses to NULL, not 0; the
+                        # unrated filter must treat both the same.
+                        "My Rating": "",
                     }
                 ),
             ],
@@ -632,18 +643,28 @@ class AdsoCoreTests(unittest.TestCase):
         physical_books = list_books(self.conn, BookFilters(format="physical"))
         tagged_books = list_books(self.conn, BookFilters(tag="Philosophy"))
         no_tag_books = list_books(self.conn, BookFilters(tag="philo"))
+        shelf_books = list_books(self.conn, BookFilters(shelf="Read"))
+        five_star_books = list_books(self.conn, BookFilters(rating=5))
+        unrated_books = list_books(self.conn, BookFilters(rating=0))
         limited_books = list_books(self.conn, BookFilters(limit=2))
 
         self.assertEqual([book["title"] for book in all_books], [
             "A Room of One's Own",
             "The Left Hand of Darkness",
             "The Name of the Rose",
+            "Zen in the Art of Archery",
         ])
         self.assertEqual([book["goodreads_id"] for book in read_books], ["2"])
         self.assertEqual([book["goodreads_id"] for book in physical_books], ["2"])
         # Tag filtering is exact-match (case-insensitive), not substring.
         self.assertEqual([book["goodreads_id"] for book in tagged_books], ["2"])
         self.assertEqual(no_tag_books, [])
+        # Shelf filtering is exact-match on the exclusive shelf, case-insensitive.
+        self.assertEqual([book["goodreads_id"] for book in shelf_books], ["2"])
+        self.assertEqual([book["goodreads_id"] for book in five_star_books], ["2"])
+        # Goodreads exports store "unrated" as 0 (or NULL when the cell is
+        # empty); rating=0 finds both.
+        self.assertEqual([book["goodreads_id"] for book in unrated_books], ["3", "1", "4"])
         self.assertEqual(len(limited_books), 2)
         self.assertIsNone(limited_books[0]["format"])
 

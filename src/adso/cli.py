@@ -352,6 +352,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     list_parser.add_argument("--tag", help="Filter by a local tag, e.g. 'philosophy'")
     list_parser.add_argument("--author", help="Filter by author")
+    list_parser.add_argument("--shelf", help="Filter by exclusive shelf, e.g. 'read' or 'to-read'")
+    list_parser.add_argument(
+        "--rating",
+        type=int,
+        choices=range(0, 6),
+        help="Filter by your star rating (0 = unrated)",
+    )
     list_parser.add_argument("--limit", type=int, help="Maximum number of books to show")
 
     search_parser = subparsers.add_parser("search", help="Search books in the local catalogue")
@@ -362,6 +369,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     search_parser.add_argument("--tag", help="Filter by a local tag, e.g. 'philosophy'")
     search_parser.add_argument("--author", help="Filter by author")
+    search_parser.add_argument("--shelf", help="Filter by exclusive shelf, e.g. 'read' or 'to-read'")
+    search_parser.add_argument(
+        "--rating",
+        type=int,
+        choices=range(0, 6),
+        help="Filter by your star rating (0 = unrated)",
+    )
     search_parser.add_argument("--limit", type=int, help="Maximum number of books to show")
 
     show_parser = subparsers.add_parser("show", help="Show detailed information for one book")
@@ -743,6 +757,8 @@ def _book_filters_from_args(args) -> BookFilters:
         format=getattr(args, "format", None),
         tag=getattr(args, "tag", None),
         author=getattr(args, "author", None),
+        shelf=getattr(args, "shelf", None),
+        rating=getattr(args, "rating", None),
         limit=getattr(args, "limit", None),
     )
 

@@ -255,5 +255,49 @@ class BookMetadataWebTests(unittest.TestCase):
         self.assertEqual(payload["subject_times"], ["19th century"])
 
 
+@unittest.skipUnless(_HAS_TESTCLIENT, "fastapi TestClient (httpx) not installed")
+class CatalogueRatingFilterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from adso.web.app import create_app
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self.tmp.name) / "adso.sqlite")
+        conn = db.connect(self.db_path)
+        db.initialize(conn)
+        run = db.create_import_run(
+            conn, source="goodreads", source_path="x.csv", mode="import", row_count=2
+        )
+        db.insert_book_from_goodreads(
+            conn,
+            {"goodreads_id": "1", "title": "Unrated Book", "author": "Mara Ellison",
+             "rating": 0, "shelves_json": "[]"},
+            import_run_id=run,
+        )
+        db.insert_book_from_goodreads(
+            conn,
+            {"goodreads_id": "2", "title": "Five Star Book", "author": "Mara Ellison",
+             "rating": 5, "shelves_json": "[]"},
+            import_run_id=run,
+        )
+        conn.commit()
+        conn.close()
+        self.client = TestClient(create_app(self.db_path))
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_rating_filter_narrows_catalogue_page(self) -> None:
+        body = self.client.get("/", params={"rating": 5}).text
+        self.assertIn("Five Star Book", body)
+        self.assertNotIn("Unrated Book", body)
+
+    def test_rating_zero_finds_unrated_books(self) -> None:
+        payload = self.client.get("/api/books", params={"rating": 0}).json()
+        self.assertEqual([b["goodreads_id"] for b in payload["books"]], ["1"])
+
+    def test_rating_out_of_range_is_rejected(self) -> None:
+        self.assertEqual(self.client.get("/api/books", params={"rating": 6}).status_code, 422)
+
+
 if __name__ == "__main__":
     unittest.main()

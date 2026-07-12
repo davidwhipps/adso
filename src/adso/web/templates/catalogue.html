@@ -29,8 +29,15 @@
     {% endfor %}
   </select>
   {% endif %}
+  <select name="rating" onchange="this.form.submit()" class="input w-40">
+    <option value="">Any rating</option>
+    {% for r in [5, 4, 3, 2, 1] %}
+    <option value="{{ r }}" {{ "selected" if rating == r | string }}>{{ "★" * r }}{{ "☆" * (5 - r) }}</option>
+    {% endfor %}
+    <option value="0" {{ "selected" if rating == "0" }}>Unrated</option>
+  </select>
   <button type="submit" class="btn">Search</button>
-  {% if q or status or format or tag %}
+  {% if q or status or format or tag or rating %}
   <a href="/" class="btn-outline">Clear</a>
   {% endif %}
 </form>
