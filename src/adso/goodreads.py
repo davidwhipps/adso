@@ -62,7 +62,15 @@ def parse_int(raw: str | None) -> int | None:
     try:
         return int(raw)
     except ValueError:
+        pass
+    # Goodreads exports some integer columns as float strings — "My Rating"
+    # started arriving as "5.0" in July 2026, which silently nulled every
+    # rating on sync. Accept integral floats; anything else is still None.
+    try:
+        value = float(raw)
+    except ValueError:
         return None
+    return int(value) if value.is_integer() else None
 
 
 def normalize_row(row: dict[str, str]) -> dict[str, Any]:

@@ -188,5 +188,56 @@ class InformationalFieldTests(unittest.TestCase):
         self.assertEqual(title, "A Completely Different Book")
 
 
+class FloatStringRatingTests(unittest.TestCase):
+    """Goodreads started exporting "My Rating" as a float string ("5.0") in
+    July 2026; strict int() parsing turned every rating into NULL and a sync
+    then wiped them all. These pin the fix."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.conn = db.connect(self.root / "adso.sqlite")
+        db.initialize(self.conn)
+
+    def tearDown(self) -> None:
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def _rating(self):
+        return self.conn.execute(
+            "SELECT rating FROM books WHERE goodreads_id='1'"
+        ).fetchone()[0]
+
+    def test_parse_int_accepts_integral_float_strings(self) -> None:
+        from adso.goodreads import parse_int
+
+        self.assertEqual(parse_int("5.0"), 5)
+        self.assertEqual(parse_int("0.0"), 0)
+        self.assertEqual(parse_int("5"), 5)
+        self.assertIsNone(parse_int("4.5"))
+        self.assertIsNone(parse_int("abc"))
+        self.assertIsNone(parse_int(""))
+        self.assertIsNone(parse_int(None))
+
+    def test_float_rating_imports_as_integer(self) -> None:
+        first = self.root / "first.csv"
+        _write(first, _base_row(**{"My Rating": "5.0"}))
+        import_goodreads_csv(self.conn, first, mode="import")
+        self.assertEqual(self._rating(), 5)
+
+    def test_sync_with_float_rating_does_not_wipe_existing_rating(self) -> None:
+        first = self.root / "first.csv"
+        _write(first, _base_row(**{"My Rating": "5"}))
+        import_goodreads_csv(self.conn, first, mode="import")
+
+        resync = self.root / "resync.csv"
+        _write(resync, _base_row(**{"My Rating": "5.0"}))
+        summary = import_goodreads_csv(self.conn, resync, mode="sync")
+
+        self.assertEqual(self._rating(), 5)
+        self.assertEqual(summary.updated, 0)
+        self.assertEqual(summary.unchanged, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
