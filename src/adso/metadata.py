@@ -4,12 +4,22 @@ Descriptions, subjects, and place/time facets are fetched from Open Library and
 *owned* locally: like covers, this is enrichment, not a Goodreads-sourced field,
 so it deliberately stays out of the source_snapshots/sync_conflicts machinery.
 
-Resolution chain per book (first hit wins):
+Resolution chain per book (first *content-bearing* hit wins):
     1. Edition by ISBN-13 then ISBN-10 -> work record.
-    2. Open Library Search by title + author -> work record. When the book has
-       no ISBN at all, the matched edition is also fetched to backfill empty
-       isbn13/isbn10 columns (fill-only-if-empty, enforced in db.backfill_isbns;
-       a guard in adso.sync keeps later Goodreads syncs from blanking them).
+    2. Open Library Search -> work record, trying progressively looser queries:
+       cleaned title (parentheticals and subtitle stripped) + author, cleaned
+       title alone, then full-text q= search. Candidates whose authors visibly
+       disagree with the book's are rejected. When the book has no ISBN at all,
+       the matched edition is also fetched to backfill empty isbn13/isbn10
+       columns (fill-only-if-empty, enforced in db.backfill_isbns; a guard in
+       adso.sync keeps later Goodreads syncs from blanking them).
+
+A matched work with no description and no subjects does not stop the chain:
+the match is kept for provenance but resolution continues, because skeleton
+work records are common (especially for recent books) while a sibling work
+reachable via search often carries the content. The 2026-07 not-found audit
+motivated this shape: half the misses were skeleton records, and most of the
+rest were exact-title searches broken by Goodreads subtitle/series noise.
 
 Description and subjects are always read from the WORK record so every book
 gets the same canonical shape regardless of which path matched it. Open Library
@@ -175,20 +185,79 @@ def _work_key_from_edition(edition: dict[str, Any]) -> str | None:
     return None
 
 
-def _search_doc(title: str, author: str) -> dict[str, Any] | None:
-    """Find the best work match for a title (+author) via the Search API."""
-    params: dict[str, Any] = {
-        "title": title,
-        "limit": 1,
-        "fields": "key,cover_edition_key,edition_key",
-    }
-    if author:
-        params["author"] = author
-    payload = _get_json(OPENLIBRARY_SEARCH, params=params)
+# How many docs each search query returns, and how many candidate works one
+# book may fetch across all queries. Requests within a book are not
+# individually rate-limited, so the fetch bound keeps a book with many
+# implausible candidates from bursting through the politeness budget.
+SEARCH_RESULT_LIMIT = 5
+MAX_CANDIDATE_WORK_FETCHES = 4
+
+_SEARCH_FIELDS = "key,cover_edition_key,edition_key,author_name"
+_PARENTHETICAL_RE = re.compile(r"\([^)]*\)")
+
+
+def _clean_title(title: str) -> str:
+    """Search form of a Goodreads title: no parentheticals, no subtitle.
+
+    Goodreads decorates titles with series/edition parentheticals and long
+    subtitles ("Atomic Habits: An Easy and Proven Way…") that Open Library's
+    title search treats as hard requirements.
+    """
+    cleaned = _PARENTHETICAL_RE.sub(" ", title).split(":")[0]
+    cleaned = " ".join(cleaned.split())
+    return cleaned or " ".join(title.split())
+
+
+def _author_tokens(author: str) -> set[str]:
+    return {token for token in re.split(r"[^\w]+", author.lower()) if len(token) > 2}
+
+
+def _plausible_author(doc: dict[str, Any], tokens: set[str]) -> bool:
+    """Reject a search doc only when its authors visibly disagree with ours."""
+    if not tokens:
+        return True
+    names = " ".join(
+        name for name in doc.get("author_name") or [] if isinstance(name, str)
+    ).lower()
+    if not names:
+        return True  # doc carries no author info: give it the benefit of the doubt
+    return any(token in names for token in tokens)
+
+
+def _search_docs(params: dict[str, Any]) -> list[dict[str, Any]]:
+    payload = _get_json(
+        OPENLIBRARY_SEARCH,
+        params={**params, "limit": SEARCH_RESULT_LIMIT, "fields": _SEARCH_FIELDS},
+    )
     if payload is None:
-        return None
-    docs = payload.get("docs") or []
-    return docs[0] if docs and isinstance(docs[0], dict) else None
+        return []
+    return [doc for doc in payload.get("docs") or [] if isinstance(doc, dict)]
+
+
+def _search_candidates(title: str, author: str):
+    """Yield plausible search docs, tightest query first, deduped by work key.
+
+    Three passes: title+author field search, title-only field search, then
+    full-text q= search. The field search misses records whose canonical OL
+    title differs slightly (leading article, alternate subtitle); q= does not.
+    """
+    cleaned = _clean_title(title)
+    tokens = _author_tokens(author)
+    queries: list[dict[str, Any]] = [
+        {"title": cleaned, "author": author} if author else {"title": cleaned}
+    ]
+    if author:
+        queries.append({"title": cleaned})
+    queries.append({"q": f"{cleaned} {author}".strip()})
+    seen: set[str] = set()
+    for params in queries:
+        for doc in _search_docs(params):
+            key = doc.get("key")
+            if not isinstance(key, str) or key in seen:
+                continue
+            seen.add(key)
+            if _plausible_author(doc, tokens):
+                yield doc
 
 
 def _first_isbn(edition: dict[str, Any], field: str) -> str | None:
@@ -199,15 +268,43 @@ def _first_isbn(edition: dict[str, Any], field: str) -> str | None:
     return None
 
 
+def _work_content(work: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "description": _parse_description(work.get("description")),
+        "subjects": _clean_subjects(work.get("subjects"), cap=SUBJECTS_CAP),
+        "subject_places": _clean_subjects(work.get("subject_places"), cap=PLACES_CAP),
+        "subject_times": _clean_subjects(work.get("subject_times"), cap=TIMES_CAP),
+    }
+
+
+def _has_content(resolved: dict[str, Any]) -> bool:
+    return bool(
+        resolved["description"]
+        or resolved["subjects"]
+        or resolved["subject_places"]
+        or resolved["subject_times"]
+    )
+
+
 def resolve_metadata(book: dict[str, Any]) -> dict[str, Any] | None:
     """Resolve work metadata (and possibly backfill ISBNs) for one book.
 
     Returns a dict with description/subjects/places/times, provenance, and any
-    backfill ISBNs, or None when no Open Library work could be matched.
+    backfill ISBNs, or None when no Open Library work could be matched at all.
+    A returned dict whose content fields are all empty means a work matched
+    but carries no content yet; the caller records it as not_found while
+    keeping the provenance.
     """
-    work = None
-    source = source_url = None
-    backfill_isbn10 = backfill_isbn13 = None
+    empty_match: dict[str, Any] | None = None
+
+    def _result(content: dict[str, Any], source: str, source_url: str) -> dict[str, Any]:
+        return {
+            **content,
+            "source": source,
+            "source_url": source_url,
+            "backfill_isbn10": None,
+            "backfill_isbn13": None,
+        }
 
     # 1. Edition by ISBN -> work.
     for isbn in (book.get("isbn13"), book.get("isbn10")):
@@ -218,25 +315,37 @@ def resolve_metadata(book: dict[str, Any]) -> dict[str, Any] | None:
             continue
         work_key = _work_key_from_edition(edition)
         work = _fetch_work(work_key) if work_key else None
-        if work is not None:
-            source = "openlibrary:isbn"
-            source_url = OPENLIBRARY_EDITION_ISBN.format(isbn=isbn)
-            break
+        if work is None:
+            continue
+        result = _result(
+            _work_content(work), "openlibrary:isbn", OPENLIBRARY_EDITION_ISBN.format(isbn=isbn)
+        )
+        if _has_content(result):
+            return result
+        # Skeleton record: remember the match, fall through to search — a
+        # sibling work often carries the content this one lacks.
+        empty_match = result
+        break
 
-    # 2. Search by title + author -> work (+ edition for ISBN backfill).
-    if work is None:
-        title = (book.get("title") or "").strip()
-        author = (book.get("author") or "").strip()
-        if not title:
-            return None
-        doc = _search_doc(title, author)
-        if doc is None:
-            return None
+    # 2. Search -> work (+ edition for ISBN backfill).
+    title = (book.get("title") or "").strip()
+    author = (book.get("author") or "").strip()
+    if not title:
+        return empty_match
+    work_fetches = 0
+    for doc in _search_candidates(title, author):
+        if work_fetches >= MAX_CANDIDATE_WORK_FETCHES:
+            break
+        work_fetches += 1
         work = _fetch_work(doc.get("key"))
         if work is None:
-            return None
-        source = "openlibrary:search"
-        source_url = f"https://openlibrary.org{doc.get('key')}"
+            continue
+        result = _result(
+            _work_content(work), "openlibrary:search", f"https://openlibrary.org{doc.get('key')}"
+        )
+        if not _has_content(result):
+            empty_match = empty_match or result
+            continue
 
         # Backfill only books with no ISBN at all; Goodreads-supplied ISBNs are
         # never second-guessed.
@@ -247,19 +356,11 @@ def resolve_metadata(book: dict[str, Any]) -> dict[str, Any] | None:
             if olid:
                 edition = _edition_by_olid(olid)
                 if edition is not None:
-                    backfill_isbn13 = _first_isbn(edition, "isbn_13")
-                    backfill_isbn10 = _first_isbn(edition, "isbn_10")
+                    result["backfill_isbn13"] = _first_isbn(edition, "isbn_13")
+                    result["backfill_isbn10"] = _first_isbn(edition, "isbn_10")
+        return result
 
-    return {
-        "description": _parse_description(work.get("description")),
-        "subjects": _clean_subjects(work.get("subjects"), cap=SUBJECTS_CAP),
-        "subject_places": _clean_subjects(work.get("subject_places"), cap=PLACES_CAP),
-        "subject_times": _clean_subjects(work.get("subject_times"), cap=TIMES_CAP),
-        "source": source,
-        "source_url": source_url,
-        "backfill_isbn10": backfill_isbn10,
-        "backfill_isbn13": backfill_isbn13,
-    }
+    return empty_match
 
 
 def _should_skip(status: str | None, refresh: bool, retry_missing: bool) -> bool:
@@ -287,8 +388,10 @@ def fetch_metadata(
     Mirrors covers.fetch_covers: ``limit`` caps books *attempted*, statuses are
     fetched / not_found / error, and ``--retry-missing`` re-attempts past
     misses. A matched work with neither description nor any subjects counts as
-    not_found so retry semantics stay meaningful. Returns summary stats
-    including how many empty ISBNs were backfilled.
+    not_found so retry semantics stay meaningful, but its provenance is kept
+    (metadata_source set, status not_found = "matched a skeleton record") and
+    any previously fetched content is preserved rather than cleared. Returns
+    summary stats including how many empty ISBNs were backfilled.
     """
     if limit is not None and limit < 1:
         raise MetadataError("limit must be at least 1.")
@@ -331,27 +434,30 @@ def fetch_metadata(
             time.sleep(RATE_LIMIT_DELAY)
             continue
 
-        has_content = resolved is not None and (
-            resolved["description"]
-            or resolved["subjects"]
-            or resolved["subject_places"]
-            or resolved["subject_times"]
-        )
-        if not has_content:
+        if resolved is None or not _has_content(resolved):
             not_found += 1
-            actions.append(
-                {"goodreads_id": str(goodreads_id), "title": title, "result": "not_found"}
-            )
+            action = {"goodreads_id": str(goodreads_id), "title": title, "result": "not_found"}
+            if resolved is not None:
+                action["matched_empty"] = "yes"
+            actions.append(action)
             if not dry_run:
+                # Mirror the error path: an empty or vanished OL record must
+                # never erase content we already own (matters on --refresh).
+                # When a work matched but was empty, record its provenance so
+                # skeleton records are distinguishable from true absences.
                 db.set_metadata(
                     conn,
                     int(book["id"]),
-                    description=None,
-                    subjects=[],
-                    subject_places=[],
-                    subject_times=[],
-                    metadata_source=None,
-                    metadata_source_url=None,
+                    description=book.get("description"),
+                    subjects=_loads_list(book.get("subjects_json")),
+                    subject_places=_loads_list(book.get("subject_places_json")),
+                    subject_times=_loads_list(book.get("subject_times_json")),
+                    metadata_source=(
+                        resolved["source"] if resolved else book.get("metadata_source")
+                    ),
+                    metadata_source_url=(
+                        resolved["source_url"] if resolved else book.get("metadata_source_url")
+                    ),
                     metadata_status="not_found",
                 )
             time.sleep(RATE_LIMIT_DELAY)

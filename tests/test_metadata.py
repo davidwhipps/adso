@@ -9,10 +9,13 @@ from unittest.mock import patch
 
 from adso import db
 from adso.metadata import (
+    MAX_CANDIDATE_WORK_FETCHES,
     OPENLIBRARY_SEARCH,
     PLACES_CAP,
+    SEARCH_RESULT_LIMIT,
     SUBJECTS_CAP,
     _clean_subjects,
+    _clean_title,
     _parse_description,
     fetch_metadata,
 )
@@ -61,6 +64,13 @@ def search_payload(work_key="/works/OL1W", cover_edition_key=None, edition_keys=
     return {"docs": [doc]}
 
 
+def search_doc(work_key, author_names=None) -> dict:
+    doc: dict = {"key": work_key}
+    if author_names is not None:
+        doc["author_name"] = author_names
+    return doc
+
+
 class MetadataHelperTests(unittest.TestCase):
     def test_parse_description_both_shapes(self) -> None:
         self.assertEqual(_parse_description("Plain text."), "Plain text.")
@@ -88,6 +98,20 @@ class MetadataHelperTests(unittest.TestCase):
         many = [f"subject {i}" for i in range(40)]
         self.assertEqual(len(_clean_subjects(many, cap=SUBJECTS_CAP)), SUBJECTS_CAP)
         self.assertEqual(_clean_subjects("not-a-list", cap=PLACES_CAP), [])
+
+    def test_clean_title_strips_noise(self) -> None:
+        self.assertEqual(
+            _clean_title("Atomic Habits: An Easy and Proven Way to Build Good Habits"),
+            "Atomic Habits",
+        )
+        self.assertEqual(_clean_title("Red Dragon (Hannibal Lecter, #1)"), "Red Dragon")
+        self.assertEqual(
+            _clean_title("Blood Year: Terror and the Islamic State (Quarterly Essay, #58)"),
+            "Blood Year",
+        )
+        self.assertEqual(_clean_title("Stoner"), "Stoner")
+        # Degenerate titles fall back to the whitespace-normalised original.
+        self.assertEqual(_clean_title("(untitled)"), "(untitled)")
 
     def test_clean_subjects_drops_non_english_tags(self) -> None:
         # OL aggregates subjects across translated editions; foreign duplicates
@@ -337,6 +361,146 @@ class MetadataFetchTests(unittest.TestCase):
         self.assertEqual(result["not_found"], 1)
         self.assertEqual(self._book("11")["metadata_status"], "not_found")
         self.assertLess(fake.calls, 20)
+
+    def test_empty_isbn_work_falls_through_to_search(self) -> None:
+        # A skeleton work behind the ISBN must not stop resolution: a sibling
+        # work found via search carries the content.
+        self._add_book("12", "Skeleton", isbn13="1212121212121", author="A. Writer")
+
+        def fake_request(method, url, **kwargs):
+            if "isbn" in url:
+                return FakeResp(json_data=edition_payload(work_key="/works/OLEMPTYW"))
+            if url == "https://openlibrary.org/works/OLEMPTYW.json":
+                return FakeResp(json_data=work_payload())
+            if url == OPENLIBRARY_SEARCH:
+                return FakeResp(json_data={"docs": [search_doc("/works/OLFULLW", ["A. Writer"])]})
+            if url == "https://openlibrary.org/works/OLFULLW.json":
+                return FakeResp(json_data=work_payload(description="From the sibling work."))
+            raise AssertionError(f"unexpected request to {url}")
+
+        with patch("adso.metadata._request", side_effect=fake_request):
+            result = fetch_metadata(self.conn)
+
+        self.assertEqual(result["fetched"], 1)
+        book = self._book("12")
+        self.assertEqual(book["metadata_status"], "fetched")
+        self.assertEqual(book["metadata_source"], "openlibrary:search")
+        self.assertEqual(book["description"], "From the sibling work.")
+
+    def test_search_uses_cleaned_title_and_filters_wrong_authors(self) -> None:
+        self._add_book(
+            "13",
+            "Atomic Habits: An Easy and Proven Way to Build Good Habits (Bestseller)",
+            author="James Clear",
+        )
+        search_params = []
+
+        def fake_request(method, url, **kwargs):
+            if url == OPENLIBRARY_SEARCH:
+                search_params.append(kwargs.get("params") or {})
+                return FakeResp(
+                    json_data={
+                        "docs": [
+                            search_doc("/works/OLWRONGW", ["Somebody Else"]),
+                            search_doc("/works/OLRIGHTW", ["James Clear"]),
+                        ]
+                    }
+                )
+            if url == "https://openlibrary.org/works/OLRIGHTW.json":
+                return FakeResp(json_data=work_payload(description="Tiny changes."))
+            raise AssertionError(f"unexpected request to {url}")
+
+        with patch("adso.metadata._request", side_effect=fake_request):
+            result = fetch_metadata(self.conn)
+
+        self.assertEqual(result["fetched"], 1)
+        self.assertEqual(search_params[0]["title"], "Atomic Habits")
+        self.assertEqual(search_params[0]["limit"], SEARCH_RESULT_LIMIT)
+        # The wrong-author doc was never fetched; the right one won.
+        self.assertEqual(self._book("13")["description"], "Tiny changes.")
+
+    def test_q_fallback_when_title_search_returns_nothing(self) -> None:
+        # OL titles the record "City Lost and Found"; the title= field search
+        # misses it but the full-text q= search does not.
+        self._add_book("14", "A City Lost and Found: Whelan the Wrecker", author="Robyn Annear")
+        queries = []
+
+        def fake_request(method, url, **kwargs):
+            if url == OPENLIBRARY_SEARCH:
+                params = kwargs.get("params") or {}
+                queries.append(params)
+                if "q" in params:
+                    return FakeResp(json_data={"docs": [search_doc("/works/OLQW", ["Robyn Annear"])]})
+                return FakeResp(json_data={"docs": []})
+            if url == "https://openlibrary.org/works/OLQW.json":
+                return FakeResp(json_data=work_payload(subjects=["Melbourne history"]))
+            raise AssertionError(f"unexpected request to {url}")
+
+        with patch("adso.metadata._request", side_effect=fake_request):
+            result = fetch_metadata(self.conn)
+
+        self.assertEqual(result["fetched"], 1)
+        self.assertEqual(queries[-1]["q"], "A City Lost and Found Robyn Annear")
+        self.assertEqual(self._book("14")["metadata_source"], "openlibrary:search")
+
+    def test_refresh_not_found_preserves_previous_content(self) -> None:
+        self._add_book("15", "Keeper", isbn13="1515151515151")
+
+        def hit(method, url, **kwargs):
+            if "isbn" in url:
+                return FakeResp(json_data=edition_payload())
+            return FakeResp(json_data=work_payload(description="Owned content."))
+
+        def miss(method, url, **kwargs):
+            return FakeResp(status_code=404)
+
+        with patch("adso.metadata._request", side_effect=hit):
+            fetch_metadata(self.conn)
+        with patch("adso.metadata._request", side_effect=miss):
+            result = fetch_metadata(self.conn, refresh=True)
+
+        self.assertEqual(result["not_found"], 1)
+        book = self._book("15")
+        self.assertEqual(book["metadata_status"], "not_found")
+        self.assertEqual(book["description"], "Owned content.")  # not cleared
+
+    def test_matched_empty_records_provenance(self) -> None:
+        self._add_book("16", "Skeleton Only", isbn13="1616161616161")
+
+        def fake_request(method, url, **kwargs):
+            if "isbn" in url:
+                return FakeResp(json_data=edition_payload())
+            if url == OPENLIBRARY_SEARCH:
+                return FakeResp(json_data={"docs": []})
+            return FakeResp(json_data=work_payload())  # empty work
+
+        with patch("adso.metadata._request", side_effect=fake_request):
+            result = fetch_metadata(self.conn)
+
+        self.assertEqual(result["not_found"], 1)
+        self.assertEqual(result["actions"][0].get("matched_empty"), "yes")
+        book = self._book("16")
+        self.assertEqual(book["metadata_status"], "not_found")
+        self.assertEqual(book["metadata_source"], "openlibrary:isbn")  # skeleton, not absent
+
+    def test_candidate_work_fetches_are_bounded(self) -> None:
+        self._add_book("17", "All Empty", author="A. Writer")
+        work_urls = []
+
+        def fake_request(method, url, **kwargs):
+            if url == OPENLIBRARY_SEARCH:
+                docs = [search_doc(f"/works/OL{i}W", ["A. Writer"]) for i in range(10)]
+                return FakeResp(json_data={"docs": docs})
+            if "/works/" in url:
+                work_urls.append(url)
+                return FakeResp(json_data=work_payload())  # every candidate is empty
+            raise AssertionError(f"unexpected request to {url}")
+
+        with patch("adso.metadata._request", side_effect=fake_request):
+            result = fetch_metadata(self.conn)
+
+        self.assertEqual(result["not_found"], 1)
+        self.assertLessEqual(len(work_urls), MAX_CANDIDATE_WORK_FETCHES)
 
 
 class MetadataMigrationTests(unittest.TestCase):

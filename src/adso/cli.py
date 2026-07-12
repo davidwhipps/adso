@@ -682,7 +682,11 @@ def _format_metadata_result(result: dict[str, object], *, dry_run: bool) -> str:
                     if action.get("isbn_backfilled"):
                         detail += ", would backfill ISBN"
                 elif outcome == "not_found":
-                    detail = "no metadata found"
+                    detail = (
+                        "matched an Open Library record with no content yet"
+                        if action.get("matched_empty")
+                        else "no metadata found"
+                    )
                 else:
                     detail = "error"
                 lines.append(f"- {title} (Goodreads ID {action.get('goodreads_id')}): {detail}")
