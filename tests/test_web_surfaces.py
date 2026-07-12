@@ -297,6 +297,18 @@ class CatalogueRatingFilterTests(unittest.TestCase):
 
     def test_rating_out_of_range_is_rejected(self) -> None:
         self.assertEqual(self.client.get("/api/books", params={"rating": 6}).status_code, 422)
+        self.assertEqual(self.client.get("/api/books", params={"rating": "five"}).status_code, 422)
+
+    def test_empty_rating_param_means_no_filter(self) -> None:
+        # The catalogue form submits rating="" when "Any rating" is selected —
+        # searching must not 422 (regression: int query param rejected "").
+        response = self.client.get("/", params={"q": "Book", "status": "", "format": "", "tag": "", "rating": ""})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Five Star Book", response.text)
+        self.assertIn("Unrated Book", response.text)
+
+        payload = self.client.get("/api/books", params={"rating": ""}).json()
+        self.assertEqual(payload["count"], 2)
 
 
 if __name__ == "__main__":

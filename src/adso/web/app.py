@@ -118,6 +118,20 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         finally:
             conn.close()
 
+    def _rating_param(raw: str | None) -> int | None:
+        # The catalogue form submits rating="" when "Any rating" is selected,
+        # so this must be parsed by hand — a plain `int | None` query param
+        # 422s on the empty string.
+        if raw is None or raw.strip() == "":
+            return None
+        try:
+            value = int(raw)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="rating must be an integer from 0 to 5")
+        if not 0 <= value <= 5:
+            raise HTTPException(status_code=422, detail="rating must be between 0 and 5")
+        return value
+
     def _filters(
         status: str | None,
         format: str | None,
@@ -153,10 +167,11 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         format: str | None = Query(None),
         tag: str | None = Query(None),
         author: str | None = Query(None),
-        rating: int | None = Query(None, ge=0, le=5),
+        rating: str | None = Query(None),
         limit: int | None = Query(None, ge=1),
     ) -> HTMLResponse:
-        filters = _filters(status, format, tag, author, rating, limit)
+        rating_value = _rating_param(rating)
+        filters = _filters(status, format, tag, author, rating_value, limit)
         books = _query_books(conn, q, filters)
         return templates.TemplateResponse(
             request,
@@ -168,7 +183,7 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
                 "format": format or "",
                 "tag": tag or "",
                 "author": author or "",
-                "rating": "" if rating is None else str(rating),
+                "rating": "" if rating_value is None else str(rating_value),
                 "statuses": distinct_statuses(conn),
                 "formats": db.VALID_FORMATS,
                 "tags": distinct_tags(conn),
@@ -331,10 +346,10 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         format: str | None = Query(None),
         tag: str | None = Query(None),
         author: str | None = Query(None),
-        rating: int | None = Query(None, ge=0, le=5),
+        rating: str | None = Query(None),
         limit: int | None = Query(None, ge=1),
     ) -> dict:
-        filters = _filters(status, format, tag, author, rating, limit)
+        filters = _filters(status, format, tag, author, _rating_param(rating), limit)
         books = _query_books(conn, q, filters)
         return {"count": len(books), "books": books}
 
