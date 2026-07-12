@@ -21,8 +21,12 @@ class BookFilters:
     tag: str | None = None
     author: str | None = None
     shelf: str | None = None
+    exclude_shelf: str | None = None
     rating: int | None = None
     limit: int | None = None
+    # "added" sorts newest-first by date_added; anything else falls back to the
+    # default title ordering.
+    sort: str | None = None
 
 
 # The set of columns search covers is defined once in db.SEARCH_FIELDS, shared
@@ -38,7 +42,7 @@ def list_books(conn: sqlite3.Connection, filters: BookFilters | None = None) -> 
         f"""
         SELECT * FROM books
         {where}
-        ORDER BY title COLLATE NOCASE, author COLLATE NOCASE
+        ORDER BY {_order_sql(filters)}
         {limit_sql}
         """,
         params,
@@ -71,7 +75,7 @@ def search_books(
         f"""
         SELECT * FROM books
         {combined_where}
-        ORDER BY title COLLATE NOCASE, author COLLATE NOCASE
+        ORDER BY {_order_sql(filters)}
         {limit_sql}
         """,
         [*params, *search_params],
@@ -124,13 +128,18 @@ def _search_books_fts(
         combined_where = "WHERE books_fts MATCH ?"
     limit_sql = _limit_sql(filters)
 
+    # An explicit sort beats relevance ordering; otherwise rank by bm25.
+    if filters.sort == "added":
+        order_sql = _order_sql(filters, table_prefix="books")
+    else:
+        order_sql = "bm25(books_fts), books.title COLLATE NOCASE, books.author COLLATE NOCASE"
     rows = conn.execute(
         f"""
         SELECT books.*
         FROM books
         JOIN books_fts ON books_fts.rowid = books.id
         {combined_where}
-        ORDER BY bm25(books_fts), books.title COLLATE NOCASE, books.author COLLATE NOCASE
+        ORDER BY {order_sql}
         {limit_sql}
         """,
         [*params, fts_query],
@@ -167,6 +176,19 @@ def _fts_query(query: str) -> str:
     return " ".join(f'"{token}"' for token in tokens)
 
 
+def _order_sql(filters: BookFilters, table_prefix: str | None = None) -> str:
+    """ORDER BY clause for the requested sort (title default, "added" newest-first).
+
+    date_added is an ISO YYYY-MM-DD string, so plain string comparison sorts
+    chronologically; NULLs (rare, pre-Goodreads rows) sink to the end.
+    """
+    prefix = f"{table_prefix}." if table_prefix else ""
+    title_order = f"{prefix}title COLLATE NOCASE, {prefix}author COLLATE NOCASE"
+    if filters.sort == "added":
+        return f"{prefix}date_added IS NULL, {prefix}date_added DESC, {title_order}"
+    return title_order
+
+
 def _filter_sql(filters: BookFilters, table_prefix: str | None = None) -> tuple[str, list[Any]]:
     clauses: list[str] = []
     params: list[Any] = []
@@ -192,6 +214,13 @@ def _filter_sql(filters: BookFilters, table_prefix: str | None = None) -> tuple[
     if filters.shelf:
         clauses.append(f"{prefix}exclusive_shelf = ? COLLATE NOCASE")
         params.append(filters.shelf.strip())
+    if filters.exclude_shelf:
+        # Catalogue is a catch-all: keep everything that isn't on the excluded
+        # shelf, including books with no exclusive_shelf recorded at all.
+        clauses.append(
+            f"({prefix}exclusive_shelf IS NULL OR {prefix}exclusive_shelf != ? COLLATE NOCASE)"
+        )
+        params.append(filters.exclude_shelf.strip())
     if filters.rating is not None:
         if filters.rating == 0:
             # Goodreads exports unrated as 0, but an empty "My Rating" cell

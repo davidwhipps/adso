@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Adso · To Read{% endblock %}
+{% block content %}
+<form method="get" action="/to-read" class="mb-6 flex flex-wrap items-center gap-2">
+  <input
+    type="search"
+    name="q"
+    value="{{ q }}"
+    placeholder="Search title, author, ISBN, notes…"
+    autofocus
+    class="input min-w-[16rem] flex-1">
+  {% if tags or tag %}
+  <select name="tag" onchange="this.form.submit()" class="input w-40">
+    <option value="">All tags</option>
+    {% for t in tags %}
+    <option value="{{ t }}" {{ "selected" if t == tag }}>{{ t }}</option>
+    {% endfor %}
+  </select>
+  {% endif %}
+  <select name="sort" onchange="this.form.submit()" class="input w-40">
+    <option value="">Sort: Title</option>
+    <option value="added" {{ "selected" if sort == "added" }}>Sort: Recently added</option>
+  </select>
+  <button type="submit" class="btn">Search</button>
+  {% if q or tag or sort %}
+  <a href="/to-read" class="btn-outline">Clear</a>
+  {% endif %}
+</form>
+
+{% if books %}
+{% set show_status_column = False %}
+{% include "_book_list.html" %}
+{% else %}
+<p class="mb-3 text-sm text-muted-foreground">{{ count }} book{{ "" if count == 1 else "s" }}</p>
+<div class="card">
+  <section class="py-6 text-muted-foreground">
+    Nothing on your to-read shelf yet. Books shelved
+    <code class="rounded bg-muted px-1 py-0.5 text-sm">to-read</code> in Goodreads
+    appear here after an import.
+  </section>
+</div>
+{% endif %}
+{% endblock %}

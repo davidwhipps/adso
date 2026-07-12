@@ -612,6 +612,7 @@ class AdsoCoreTests(unittest.TestCase):
                         "Exclusive Shelf": "read",
                         "Bookshelves": "read, fiction",
                         "My Rating": "5",
+                        "Date Added": "2026/05/02",
                     }
                 ),
                 row(
@@ -621,6 +622,7 @@ class AdsoCoreTests(unittest.TestCase):
                         "Author": "Virginia Woolf",
                         "Exclusive Shelf": "currently-reading",
                         "Bookshelves": "currently-reading, essays",
+                        "Date Added": "2026/03/15",
                     }
                 ),
                 row(
@@ -631,6 +633,7 @@ class AdsoCoreTests(unittest.TestCase):
                         # An empty "My Rating" cell parses to NULL, not 0; the
                         # unrated filter must treat both the same.
                         "My Rating": "",
+                        "Date Added": "2026/06/01",
                     }
                 ),
             ],
@@ -644,9 +647,14 @@ class AdsoCoreTests(unittest.TestCase):
         tagged_books = list_books(self.conn, BookFilters(tag="Philosophy"))
         no_tag_books = list_books(self.conn, BookFilters(tag="philo"))
         shelf_books = list_books(self.conn, BookFilters(shelf="Read"))
+        # The catalogue/to-read split: To Read owns the to-read shelf, the
+        # Catalogue page is the catch-all for everything else.
+        catalogue_books = list_books(self.conn, BookFilters(exclude_shelf="to-read"))
+        to_read_books = list_books(self.conn, BookFilters(shelf="to-read"))
         five_star_books = list_books(self.conn, BookFilters(rating=5))
         unrated_books = list_books(self.conn, BookFilters(rating=0))
         limited_books = list_books(self.conn, BookFilters(limit=2))
+        recent_books = list_books(self.conn, BookFilters(sort="added"))
 
         self.assertEqual([book["title"] for book in all_books], [
             "A Room of One's Own",
@@ -661,12 +669,19 @@ class AdsoCoreTests(unittest.TestCase):
         self.assertEqual(no_tag_books, [])
         # Shelf filtering is exact-match on the exclusive shelf, case-insensitive.
         self.assertEqual([book["goodreads_id"] for book in shelf_books], ["2"])
+        # exclude_shelf keeps read + currently-reading (books 2, 3) and drops the
+        # to-read shelf (books 1, 4); shelf="to-read" is its exact complement.
+        self.assertEqual([book["goodreads_id"] for book in catalogue_books], ["3", "2"])
+        self.assertEqual([book["goodreads_id"] for book in to_read_books], ["1", "4"])
         self.assertEqual([book["goodreads_id"] for book in five_star_books], ["2"])
         # Goodreads exports store "unrated" as 0 (or NULL when the cell is
         # empty); rating=0 finds both.
         self.assertEqual([book["goodreads_id"] for book in unrated_books], ["3", "1", "4"])
         self.assertEqual(len(limited_books), 2)
         self.assertIsNone(limited_books[0]["format"])
+        # sort="added" is newest-first by date_added (4: 06/01, 2: 05/02,
+        # 1: 04/28 fixture default, 3: 03/15).
+        self.assertEqual([book["goodreads_id"] for book in recent_books], ["4", "2", "1", "3"])
 
     def test_catalogue_query_service_searches_and_gets_books(self) -> None:
         csv_path = self.root / "goodreads.csv"

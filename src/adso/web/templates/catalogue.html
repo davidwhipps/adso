@@ -36,107 +36,18 @@
     {% endfor %}
     <option value="0" {{ "selected" if rating == "0" }}>Unrated</option>
   </select>
+  <select name="sort" onchange="this.form.submit()" class="input w-40">
+    <option value="">Sort: Title</option>
+    <option value="added" {{ "selected" if sort == "added" }}>Sort: Recently added</option>
+  </select>
   <button type="submit" class="btn">Search</button>
-  {% if q or status or format or tag or rating %}
+  {% if q or status or format or tag or rating or sort %}
   <a href="/" class="btn-outline">Clear</a>
   {% endif %}
 </form>
 
 {% if books %}
-<div
-  x-data="{ view: localStorage.getItem('adso_view') || 'shelf', set(v){ this.view = v; localStorage.setItem('adso_view', v) } }"
-  x-cloak>
-  <div class="mb-3 flex items-center justify-between">
-    <p class="text-sm text-muted-foreground">{{ count }} book{{ "" if count == 1 else "s" }}</p>
-    <div class="inline-flex overflow-hidden rounded-md border text-sm">
-      <button
-        type="button"
-        @click="set('shelf')"
-        :class="view === 'shelf' ? 'bg-muted font-medium' : 'text-muted-foreground'"
-        class="px-3 py-1">Shelf</button>
-      <button
-        type="button"
-        @click="set('table')"
-        :class="view === 'table' ? 'bg-muted font-medium' : 'text-muted-foreground'"
-        class="border-l px-3 py-1">Table</button>
-    </div>
-  </div>
-
-  <!-- Shelf grid -->
-  <div
-    x-show="view === 'shelf'"
-    class="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
-    {% for book in books %}
-    {% if book.goodreads_id %}
-    <a href="/book/{{ book.goodreads_id }}" class="group block">
-      <img
-        src="{{ book.cover_url }}"
-        loading="lazy"
-        alt="Cover of {{ book.title }}"
-        class="aspect-[2/3] w-full rounded-lg border bg-muted object-cover">
-      <p class="mt-2 line-clamp-2 text-sm font-medium group-hover:underline">{{ book.title }}</p>
-      <p class="line-clamp-1 text-xs text-muted-foreground">{{ book.author or "" }}</p>
-    </a>
-    {% else %}
-    <div class="block">
-      <div class="flex aspect-[2/3] w-full items-center justify-center rounded-lg border bg-muted text-muted-foreground">?</div>
-      <p class="mt-2 line-clamp-2 text-sm font-medium">{{ book.title }}</p>
-      <p class="line-clamp-1 text-xs text-muted-foreground">{{ book.author or "" }}</p>
-    </div>
-    {% endif %}
-    {% endfor %}
-  </div>
-
-  <!-- Table -->
-  <div x-show="view === 'table'" class="overflow-hidden rounded-lg border">
-    <table class="table">
-      <thead class="bg-muted/50">
-        <tr>
-          <th class="w-12"></th>
-          <th>Title</th>
-          <th>Author</th>
-          <th>Status</th>
-          <th>Format</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for book in books %}
-        <tr>
-          <td>
-            {% if book.goodreads_id %}
-            <img
-              src="{{ book.cover_url }}"
-              loading="lazy"
-              alt=""
-              class="h-14 w-10 rounded bg-muted object-cover">
-            {% endif %}
-          </td>
-          <td class="font-medium whitespace-normal">
-            {% if book.goodreads_id %}
-            <a href="/book/{{ book.goodreads_id }}" class="hover:underline">{{ book.title }}</a>
-            {% else %}
-            {{ book.title }}
-            {% endif %}
-          </td>
-          <td class="text-muted-foreground">{{ book.author or "" }}</td>
-          <td>
-            {% if book.reading_status %}
-            <span class="badge-secondary">{{ book.reading_status }}</span>
-            {% endif %}
-          </td>
-          <td>
-            {% if book["format"] %}
-            <span class="badge">{{ book["format"] | capitalize }}</span>
-            {% else %}
-            <span class="badge-outline">not owned</span>
-            {% endif %}
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</div>
+{% include "_book_list.html" %}
 {% else %}
 <p class="mb-3 text-sm text-muted-foreground">{{ count }} book{{ "" if count == 1 else "s" }}</p>
 <div class="card">

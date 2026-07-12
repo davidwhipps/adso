@@ -5,4 +5,4 @@
     — {{ count }} conflict{{ "" if count == 1 else "s" }} {{ resolution_label }}.
   </section>
 </div>
-<span id="nav-conflict-badge" hx-swap-oob="true">{% if pending_count %}<span class="badge-destructive">{{ pending_count }}</span>{% endif %}</span>
+{% with oob=True %}{% include "_nav_badge.html" %}{% endwith %}

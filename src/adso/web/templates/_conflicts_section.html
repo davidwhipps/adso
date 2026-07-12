@@ -1,0 +1,49 @@
+{# Conflicts section of the Review page. Expects `groups` (open conflict groups),
+   `total` (open field count), `deferred_count`, and `decided`. #}
+<section>
+  <h2 class="text-xl font-semibold tracking-tight">Conflicts</h2>
+  <p class="mb-6 text-muted-foreground">
+    {% if total %}
+    {{ total }} open field conflict{{ "" if total == 1 else "s" }} across
+    {{ groups|length }} book{{ "" if groups|length == 1 else "s" }}.
+    {% if deferred_count %}{{ deferred_count }} deferred for later review.{% endif %}
+    Your local values are preserved until you decide.
+    {% else %}
+    No open conflicts — a field conflict is when a Goodreads value and your local
+    edit to the same field both changed since the last sync.
+    {% endif %}
+  </p>
+
+  <div id="conflict-list" class="flex flex-col gap-6">
+    {% for group in groups %}
+      {% include "_conflict_group.html" %}
+    {% endfor %}
+  </div>
+
+  {% if decided %}
+  <h3 class="mt-8 mb-3 text-lg font-semibold tracking-tight">Recently decided</h3>
+  <div class="flex flex-col gap-4">
+    {% for group in decided %}
+    <div class="card">
+      <header class="border-b pb-3">
+        <h4>
+          {% if group.goodreads_id %}
+          <a href="/book/{{ group.goodreads_id }}" class="hover:underline">{{ group.title }}</a>
+          {% else %}
+          {{ group.title }}
+          {% endif %}
+        </h4>
+        <p class="text-sm text-muted-foreground">{{ group.author or "Unknown author" }}</p>
+      </header>
+      <section class="flex flex-col gap-2 pt-3">
+        {% for c in group.conflicts %}
+          {% with id=c.id, field_label=c.field_label, resolution_label=c.decision_label, value=c.value, actor=c.actor %}
+            {% include "_conflict_field_resolved.html" %}
+          {% endwith %}
+        {% endfor %}
+      </section>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</section>

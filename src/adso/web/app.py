@@ -16,7 +16,7 @@ from html import escape
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -43,6 +43,10 @@ from ..notion import NotionConfigError, export_to_notion
 WEB_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = WEB_DIR / "templates"
 STATIC_DIR = WEB_DIR / "static"
+
+# Goodreads' raw exclusive-shelf value for want-to-read books. It is the single
+# axis that splits the Catalogue (everything else) from the To Read page.
+TO_READ_SHELF = "to-read"
 
 # Muted tints for the generated placeholder shown when a book has no cover.
 _PLACEHOLDER_TINTS = ("#6b7280", "#7c6f64", "#5f7470", "#6d6875", "#785964", "#4a6670")
@@ -97,6 +101,12 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         openapi_url="/api/openapi.json",
     )
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+    # Cache-bust the stylesheet by its mtime so browsers pick up a rebuilt
+    # app.css after an upgrade instead of serving a stale cached copy.
+    _css_path = STATIC_DIR / "app.css"
+    templates.env.globals["css_version"] = (
+        int(_css_path.stat().st_mtime) if _css_path.exists() else 0
+    )
 
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -117,6 +127,22 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
             yield conn
         finally:
             conn.close()
+
+    def _nav_ctx(conn: sqlite3.Connection) -> dict:
+        """Shared top-bar context: the combined Review badge count.
+
+        Every full-page render needs the pending conflict + duplicate counts for
+        the "More" menu badge; centralising it here keeps each route from
+        recomputing the pair by hand (and defines the single aggregate the badge
+        now shows).
+        """
+        pending = conflicts_service.pending_count(conn)
+        dupes = dedupe_service.pending_count(conn)
+        return {
+            "pending_count": pending,
+            "duplicate_count": dupes,
+            "review_count": pending + dupes,
+        }
 
     def _rating_param(raw: str | None) -> int | None:
         # The catalogue form submits rating="" when "Any rating" is selected,
@@ -139,14 +165,18 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         author: str | None,
         rating: int | None,
         limit: int | None,
+        exclude_shelf: str | None = None,
+        sort: str | None = None,
     ) -> BookFilters:
         return BookFilters(
             status=status or None,
             format=format if format in db.VALID_FORMATS else None,
             tag=(tag or "").strip() or None,
             author=author or None,
+            exclude_shelf=exclude_shelf,
             rating=rating,
             limit=limit,
+            sort=sort if sort == "added" else None,
         )
 
     def _query_books(
@@ -168,11 +198,20 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         tag: str | None = Query(None),
         author: str | None = Query(None),
         rating: str | None = Query(None),
+        sort: str | None = Query(None),
         limit: int | None = Query(None, ge=1),
     ) -> HTMLResponse:
         rating_value = _rating_param(rating)
-        filters = _filters(status, format, tag, author, rating_value, limit)
+        # The Catalogue is everything that isn't want-to-read; the To Read page
+        # owns the to-read shelf. Excluding it here keeps the two contexts apart.
+        filters = _filters(
+            status, format, tag, author, rating_value, limit,
+            exclude_shelf=TO_READ_SHELF, sort=sort,
+        )
         books = _query_books(conn, q, filters)
+        # "To Read" is a status the To Read page owns, so drop it from the
+        # Catalogue's status filter — it would only ever return nothing here.
+        statuses = [s for s in distinct_statuses(conn) if s.strip().lower() != "to read"]
         return templates.TemplateResponse(
             request,
             "catalogue.html",
@@ -184,12 +223,44 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
                 "tag": tag or "",
                 "author": author or "",
                 "rating": "" if rating_value is None else str(rating_value),
-                "statuses": distinct_statuses(conn),
+                "sort": filters.sort or "",
+                "statuses": statuses,
                 "formats": db.VALID_FORMATS,
                 "tags": distinct_tags(conn),
                 "count": len(books),
-                "pending_count": conflicts_service.pending_count(conn),
-                "duplicate_count": dedupe_service.pending_count(conn),
+                **_nav_ctx(conn),
+            },
+        )
+
+    @app.get("/to-read", response_class=HTMLResponse)
+    def to_read(
+        request: Request,
+        conn: sqlite3.Connection = Depends(get_conn),
+        q: str = Query("", description="Search query"),
+        tag: str | None = Query(None),
+        sort: str | None = Query(None),
+        limit: int | None = Query(None, ge=1),
+    ) -> HTMLResponse:
+        # The To Read page is inherently the want-to-read shelf: no status or
+        # rating filters (unread books have neither), just search + tag.
+        filters = BookFilters(
+            shelf=TO_READ_SHELF,
+            tag=(tag or "").strip() or None,
+            limit=limit,
+            sort=sort if sort == "added" else None,
+        )
+        books = _query_books(conn, q, filters)
+        return templates.TemplateResponse(
+            request,
+            "to_read.html",
+            {
+                "books": books,
+                "q": q,
+                "tag": tag or "",
+                "sort": filters.sort or "",
+                "tags": distinct_tags(conn),
+                "count": len(books),
+                **_nav_ctx(conn),
             },
         )
 
@@ -207,8 +278,7 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
             "book_detail.html",
             {
                 "book": book,
-                "pending_count": conflicts_service.pending_count(conn),
-                "duplicate_count": dedupe_service.pending_count(conn),
+                **_nav_ctx(conn),
             },
         )
 
@@ -363,26 +433,38 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
             raise HTTPException(status_code=404, detail=f"No book for Goodreads ID {goodreads_id}")
         return book
 
-    @app.get("/conflicts", response_class=HTMLResponse)
-    def conflicts_page(
+    def _review_context(conn: sqlite3.Connection) -> dict:
+        """Everything the consolidated Review page renders: field conflicts and
+        suspected duplicate records, namespaced so the two sections don't collide.
+        """
+        conflict_groups = conflicts_service.list_open_conflicts(conn)
+        duplicate_groups = dedupe_service.list_open_duplicates(conn)
+        return {
+            "conflict_groups": conflict_groups,
+            "conflict_total": sum(len(group["conflicts"]) for group in conflict_groups),
+            "decided": conflicts_service.list_decided_conflicts(conn),
+            "deferred_count": conflicts_service.deferred_count(conn),
+            "duplicate_groups": duplicate_groups,
+            "duplicate_total": len(duplicate_groups),
+            **_nav_ctx(conn),
+        }
+
+    @app.get("/review", response_class=HTMLResponse)
+    def review_page(
         request: Request,
         conn: sqlite3.Connection = Depends(get_conn),
     ) -> HTMLResponse:
-        groups = conflicts_service.list_open_conflicts(conn)
-        decided = conflicts_service.list_decided_conflicts(conn)
-        total = sum(len(group["conflicts"]) for group in groups)
-        return templates.TemplateResponse(
-            request,
-            "conflicts.html",
-            {
-                "groups": groups,
-                "decided": decided,
-                "total": total,
-                "pending_count": conflicts_service.pending_count(conn),
-                "deferred_count": conflicts_service.deferred_count(conn),
-                "duplicate_count": dedupe_service.pending_count(conn),
-            },
-        )
+        return templates.TemplateResponse(request, "review.html", _review_context(conn))
+
+    # The old split pages now live as sections of Review; keep the URLs working
+    # for bookmarks and CLI-printed links.
+    @app.get("/conflicts")
+    def conflicts_redirect() -> RedirectResponse:
+        return RedirectResponse("/review", status_code=307)
+
+    @app.get("/duplicates")
+    def duplicates_redirect() -> RedirectResponse:
+        return RedirectResponse("/review", status_code=307)
 
     @app.post("/conflicts/{conflict_id}/resolve", response_class=HTMLResponse)
     def resolve_conflict(
@@ -407,13 +489,13 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
                 {
                     "c": conflicts_service.conflict_field_view(conn, conflict_id),
                     "swap": True,
-                    "pending_count": conflicts_service.pending_count(conn),
+                    **_nav_ctx(conn),
                 },
             )
         return templates.TemplateResponse(
             request,
             "_conflict_field_resolved.html",
-            {"swap": True, "pending_count": conflicts_service.pending_count(conn), **outcome},
+            {"swap": True, **outcome, **_nav_ctx(conn)},
         )
 
     @app.post("/conflicts/book/{book_id}/resolve", response_class=HTMLResponse)
@@ -430,7 +512,7 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         return templates.TemplateResponse(
             request,
             "_conflict_group_resolved.html",
-            {"pending_count": conflicts_service.pending_count(conn), **outcome},
+            {**outcome, **_nav_ctx(conn)},
         )
 
     @app.get("/activity", response_class=HTMLResponse)
@@ -445,8 +527,7 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
             {
                 "runs": runs,
                 "latest": runs[0] if runs else None,
-                "pending_count": conflicts_service.pending_count(conn),
-                "duplicate_count": dedupe_service.pending_count(conn),
+                **_nav_ctx(conn),
             },
         )
 
@@ -459,8 +540,7 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
             request,
             "import.html",
             {
-                "pending_count": conflicts_service.pending_count(conn),
-                "duplicate_count": dedupe_service.pending_count(conn),
+                **_nav_ctx(conn),
             },
         )
 
@@ -525,44 +605,18 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
                 if tmp_path and os.path.exists(tmp_path):
                     os.unlink(tmp_path)
 
-        context["pending_count"] = conflicts_service.pending_count(conn)
-        context["duplicate_count"] = dedupe_service.pending_count(conn)
+        context.update(_nav_ctx(conn))
         return templates.TemplateResponse(request, "import.html", context)
-
-    @app.get("/duplicates", response_class=HTMLResponse)
-    def duplicates_page(
-        request: Request,
-        conn: sqlite3.Connection = Depends(get_conn),
-    ) -> HTMLResponse:
-        groups = dedupe_service.list_open_duplicates(conn)
-        return templates.TemplateResponse(
-            request,
-            "duplicates.html",
-            {
-                "groups": groups,
-                "total": len(groups),
-                "pending_count": conflicts_service.pending_count(conn),
-                "duplicate_count": len(groups),
-            },
-        )
 
     @app.post("/duplicates/scan", response_class=HTMLResponse)
     def scan_duplicates(
         request: Request,
         conn: sqlite3.Connection = Depends(get_conn),
     ) -> HTMLResponse:
+        # The "Re-scan" button swaps the whole body, so re-render the full Review
+        # page (nav badge included) with the freshly scanned duplicate groups.
         dedupe_service.scan_duplicates(conn)
-        groups = dedupe_service.list_open_duplicates(conn)
-        return templates.TemplateResponse(
-            request,
-            "duplicates.html",
-            {
-                "groups": groups,
-                "total": len(groups),
-                "pending_count": conflicts_service.pending_count(conn),
-                "duplicate_count": len(groups),
-            },
-        )
+        return templates.TemplateResponse(request, "review.html", _review_context(conn))
 
     @app.post("/duplicates/merge", response_class=HTMLResponse)
     def merge_duplicate(
@@ -578,7 +632,7 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         return templates.TemplateResponse(
             request,
             "_duplicate_resolved.html",
-            {"duplicate_count": dedupe_service.pending_count(conn), **outcome},
+            {**outcome, **_nav_ctx(conn)},
         )
 
     @app.post("/duplicates/dismiss", response_class=HTMLResponse)
@@ -591,7 +645,7 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         return templates.TemplateResponse(
             request,
             "_duplicate_resolved.html",
-            {"duplicate_count": dedupe_service.pending_count(conn), **outcome},
+            {**outcome, **_nav_ctx(conn)},
         )
 
     @app.get("/export", response_class=HTMLResponse)
@@ -605,8 +659,7 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
             {
                 "notion": _notion_target(),
                 "book_count": conn.execute("SELECT COUNT(*) FROM books").fetchone()[0],
-                "pending_count": conflicts_service.pending_count(conn),
-                "duplicate_count": dedupe_service.pending_count(conn),
+                **_nav_ctx(conn),
             },
         )
 
@@ -672,8 +725,7 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
             {
                 "report_title": title,
                 "report_body": body,
-                "pending_count": conflicts_service.pending_count(conn),
-                "duplicate_count": dedupe_service.pending_count(conn),
+                **_nav_ctx(conn),
             },
         )
 

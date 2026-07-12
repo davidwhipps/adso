@@ -1,0 +1,5 @@
+{# Combined Review count (pending conflicts + duplicate groups) for the top-bar
+   "More" menu. Included plainly in the nav on a full render; re-emitted with
+   hx-swap-oob="true" after an in-place resolve/merge/dismiss so the badge stays
+   live without a full page reload. Pass oob=True for the out-of-band variant. #}
+<span id="nav-more-badge"{% if oob %} hx-swap-oob="true"{% endif %}>{% if review_count %}<span class="badge-destructive">{{ review_count }}</span>{% endif %}</span>

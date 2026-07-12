@@ -4,26 +4,51 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Adso{% endblock %}</title>
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/app.css?v={{ css_version }}">
 </head>
 <body class="min-h-screen bg-background text-foreground font-sans antialiased">
-  <header class="sticky top-0 z-10 border-b bg-background/95 backdrop-blur">
+  <header class="sticky top-0 z-10 border-b bg-[#f6f4e9]/95 backdrop-blur">
     <div class="mx-auto flex h-14 max-w-5xl items-center gap-3 px-4">
       <a href="/" class="text-lg font-semibold tracking-tight">Adso</a>
-      <span class="badge-secondary hidden sm:inline-flex">local</span>
+      <span class="hidden sm:inline-flex items-center rounded-md border border-[#d9d0a0] bg-[#ece4bb] px-2 py-0.5 text-xs font-medium text-[#6b6220]">local</span>
+      {% set path = request.url.path if request else "" %}
       <nav class="ml-auto flex items-center gap-4 text-sm">
-        <a href="/" class="text-muted-foreground hover:text-foreground">Catalogue</a>
-        <a href="/import" class="text-muted-foreground hover:text-foreground">Import</a>
-        <a href="/export" class="text-muted-foreground hover:text-foreground">Export</a>
-        <a href="/activity" class="text-muted-foreground hover:text-foreground">Activity</a>
-        <a href="/conflicts" class="flex items-center gap-1.5 text-muted-foreground hover:text-foreground">
-          Conflicts
-          <span id="nav-conflict-badge">{% if pending_count %}<span class="badge-destructive">{{ pending_count }}</span>{% endif %}</span>
-        </a>
-        <a href="/duplicates" class="flex items-center gap-1.5 text-muted-foreground hover:text-foreground">
-          Duplicates
-          <span id="nav-duplicate-badge">{% if duplicate_count %}<span class="badge-destructive">{{ duplicate_count }}</span>{% endif %}</span>
-        </a>
+        <a href="/" class="{{ 'text-foreground font-medium' if path == '/' else 'text-muted-foreground hover:text-foreground' }}">Catalogue</a>
+        <a href="/to-read" class="{{ 'text-foreground font-medium' if path == '/to-read' else 'text-muted-foreground hover:text-foreground' }}">To Read</a>
+        <div
+          class="relative"
+          x-data="{ open: false, timer: null, show() { clearTimeout(this.timer); this.open = true }, hide() { this.timer = setTimeout(() => this.open = false, 250) } }"
+          @mouseenter="show()"
+          @mouseleave="hide()"
+          @focusout="if (!$el.contains($event.relatedTarget)) open = false">
+          <button
+            type="button"
+            @click="open = !open"
+            @keydown.escape="open = false"
+            :aria-expanded="open"
+            aria-haspopup="true"
+            class="flex items-center gap-1.5 {{ 'text-foreground font-medium' if path in ['/import', '/export', '/activity', '/review'] else 'text-muted-foreground hover:text-foreground' }}">
+            More
+            <span aria-hidden="true" class="text-xs">▾</span>
+            {% include "_nav_badge.html" %}
+          </button>
+          {# The pt-2 wrapper bridges the visual gap between the trigger and the
+             panel so the pointer never leaves the hover area mid-transition. #}
+          <div
+            x-show="open"
+            x-cloak
+            class="absolute right-0 top-full z-20 pt-2">
+            <div role="menu" class="w-44 rounded-md border bg-background p-1 shadow-md">
+              <a href="/import" role="menuitem" class="block rounded px-2 py-1.5 text-muted-foreground hover:bg-muted hover:text-foreground">Import</a>
+              <a href="/export" role="menuitem" class="block rounded px-2 py-1.5 text-muted-foreground hover:bg-muted hover:text-foreground">Export</a>
+              <a href="/activity" role="menuitem" class="block rounded px-2 py-1.5 text-muted-foreground hover:bg-muted hover:text-foreground">Activity</a>
+              <a href="/review" role="menuitem" class="flex items-center justify-between gap-2 rounded px-2 py-1.5 text-muted-foreground hover:bg-muted hover:text-foreground">
+                <span>Review</span>
+                {% if review_count %}<span class="badge-destructive">{{ review_count }}</span>{% endif %}
+              </a>
+            </div>
+          </div>
+        </div>
       </nav>
     </div>
   </header>

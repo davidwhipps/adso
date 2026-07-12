@@ -14,4 +14,4 @@
     Reopen
   </button>
 </div>
-{% if swap %}<span id="nav-conflict-badge" hx-swap-oob="true">{% if pending_count %}<span class="badge-destructive">{{ pending_count }}</span>{% endif %}</span>{% endif %}
+{% if swap %}{% with oob=True %}{% include "_nav_badge.html" %}{% endwith %}{% endif %}

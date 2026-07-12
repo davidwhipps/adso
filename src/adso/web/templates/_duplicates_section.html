@@ -1,0 +1,30 @@
+{# Duplicates section of the Review page. Expects `groups` (open duplicate groups)
+   and `total`. The re-scan button swaps the whole page body. #}
+<section>
+  <div class="mb-6 flex flex-wrap items-start justify-between gap-3">
+    <div>
+      <h2 class="text-xl font-semibold tracking-tight">Duplicates</h2>
+      <p class="mt-1 text-muted-foreground">
+        {% if total %}
+        {{ total }} suspected duplicate group{{ "" if total == 1 else "s" }}. Goodreads re-IDs
+        books when their edition changes, which can leave two records for the same work.
+        {% else %}
+        No suspected duplicates. Run a scan to check your catalogue.
+        {% endif %}
+      </p>
+    </div>
+    <button
+      class="btn-sm-outline shrink-0"
+      hx-post="/duplicates/scan"
+      hx-target="body"
+      hx-swap="outerHTML">
+      Re-scan catalogue
+    </button>
+  </div>
+
+  <div id="duplicate-list" class="flex flex-col gap-6">
+    {% for group in groups %}
+      {% include "_duplicate_group.html" %}
+    {% endfor %}
+  </div>
+</section>

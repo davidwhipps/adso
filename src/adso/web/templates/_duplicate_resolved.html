@@ -5,4 +5,4 @@
     — {{ outcome_label }}{% if merged %} this record{% endif %}.
   </section>
 </div>
-<span id="nav-duplicate-badge" hx-swap-oob="true">{% if duplicate_count %}<span class="badge-destructive">{{ duplicate_count }}</span>{% endif %}</span>
+{% with oob=True %}{% include "_nav_badge.html" %}{% endwith %}
