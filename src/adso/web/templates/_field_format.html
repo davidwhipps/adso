@@ -1,0 +1,25 @@
+{# Format control — self-contained and always live: saves the moment you pick
+   an option and swaps itself with the server-rendered truth. `scope`
+   (detail|shelf|table) namespaces the id so one book can host this control in
+   several places at once without colliding. A POST response may set `saved`
+   (show the pulse), `error` (show inline), and `oob` (also emit the table cell
+   swap). Expects `book`, `scope`. #}
+<label id="{{ scope }}-format-{{ book.goodreads_id }}" class="grid gap-1.5 text-sm">
+  <span class="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+    Format
+    {% if saved %}<span class="save-pulse normal-case tracking-normal text-emerald-600 dark:text-emerald-400">Saved ✓</span>{% endif %}
+  </span>
+  <select class="input" name="format"
+          hx-post="/book/{{ book.goodreads_id }}/format"
+          hx-vals='{"scope": "{{ scope }}"}'
+          hx-target="#{{ scope }}-format-{{ book.goodreads_id }}"
+          hx-swap="outerHTML"
+          hx-trigger="change">
+    <option value="" {% if not book["format"] %}selected{% endif %}>— Not owned</option>
+    <option value="physical" {% if book["format"] == "physical" %}selected{% endif %}>Physical</option>
+    <option value="ebook" {% if book["format"] == "ebook" %}selected{% endif %}>Ebook</option>
+    <option value="audiobook" {% if book["format"] == "audiobook" %}selected{% endif %}>Audiobook</option>
+  </select>
+  {% if error %}<span class="text-xs text-destructive">{{ error }}</span>{% endif %}
+</label>
+{% if oob %}<span id="row-format-{{ book.goodreads_id }}" hx-swap-oob="true">{% include "_format_badge.html" %}</span>{% endif %}

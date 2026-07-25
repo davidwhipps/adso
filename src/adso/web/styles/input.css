@@ -19,6 +19,68 @@
 }
 
 /*
+ * Placeholders are informational ("—", "+ tag", "Add a private note…") but only
+ * useful while a field is at rest — once you focus a field to type, the
+ * placeholder just gets in the way, so fade it out. It returns on blur if the
+ * field is still empty.
+ */
+.input:focus::placeholder {
+  opacity: 0;
+}
+
+/*
+ * Format column on the To Read page: nearly every book is unowned, so the badge
+ * is noise more than signal. Fade the whole column back so an actual owned
+ * format still reads but "not owned" recedes. Applied to the cell (not the
+ * badge) so it survives the out-of-band badge swap after a quick edit.
+ */
+.format-muted {
+  opacity: 0.4;
+}
+.format-muted:hover {
+  opacity: 1;
+}
+
+/*
+ * Autosave confirmation. Each field control saves on change and swaps in the
+ * server-rendered fragment; when that fragment carries a "Saved ✓" marker it
+ * animates from visible to gone, so the confirmation flashes once on insert and
+ * then disappears without any JS state to manage.
+ */
+@keyframes adso-save-pulse {
+  0%,
+  60% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+.save-pulse {
+  animation: adso-save-pulse 1.6s ease-out forwards;
+}
+
+/*
+ * Quick-edit pencil on list items. Hidden until its enclosing `.group` item
+ * (shelf card or table row) is hovered or focused; Alpine forces it visible via
+ * an inline style while the popover is open. On touch devices, where there is no
+ * hover, it stays visible so the affordance is still reachable.
+ */
+.quick-edit-trigger {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.group:hover .quick-edit-trigger,
+.group:focus-within .quick-edit-trigger {
+  opacity: 1;
+}
+@media (hover: none) {
+  .quick-edit-trigger {
+    opacity: 1;
+  }
+}
+
+/*
  * Visual star rating. A single row of five ★ glyphs whose fill is clipped to
  * `--rating / 5`, so the same component handles whole ratings and fractional
  * averages. Filled portion uses amber; the remainder falls back to the muted

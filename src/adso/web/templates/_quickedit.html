@@ -1,0 +1,55 @@
+{# Hover/focus-revealed pencil that opens a quick-edit popover of the local
+   fields for `book`. The panel body is loaded lazily the first time the pencil
+   is opened (so a list of hundreds of books doesn't render thousands of hidden
+   controls up front); Alpine toggles visibility thereafter. `scope`
+   (shelf|table) namespaces the loaded controls so the same book's shelf and
+   table popovers never share element ids. Reveal is driven by the enclosing
+   `.group` item — see .quick-edit-trigger in styles/input.css.
+
+   The panel is position:fixed and placed by `place()` so it stays on screen from
+   any grid column (a purely CSS anchor would overflow the viewport for the
+   left/right-edge cards and on the 2-column mobile grid). Expects `book`,
+   `scope`. #}
+<div
+  x-data="{
+    open: false,
+    style: '',
+    toggle() { this.open = !this.open; if (this.open) this.$nextTick(() => this.place()); },
+    close() { this.open = false; },
+    place() {
+      if (!this.open) return;
+      const btn = this.$refs.trigger, panel = this.$refs.panel, pad = 8;
+      const r = btn.getBoundingClientRect();
+      let left = Math.min(Math.max(pad, r.right - panel.offsetWidth), window.innerWidth - panel.offsetWidth - pad);
+      let top = r.bottom + 4;
+      if (top + panel.offsetHeight > window.innerHeight - pad) top = Math.max(pad, r.top - panel.offsetHeight - 4);
+      this.style = `left:${left}px;top:${top}px`;
+    },
+  }"
+  @keydown.escape="close()"
+  @click.outside="close()"
+  @scroll.window="place()"
+  @resize.window="place()"
+  @htmx:after-swap="place()">
+  <button type="button"
+          x-ref="trigger"
+          @click="toggle()"
+          :style="open ? 'opacity: 1' : null"
+          :aria-expanded="open"
+          aria-haspopup="true"
+          aria-label="Quick edit {{ book.title }}"
+          hx-get="/book/{{ book.goodreads_id }}/local/panel?scope={{ scope }}"
+          hx-target="#panel-{{ scope }}-{{ book.goodreads_id }}"
+          hx-swap="innerHTML"
+          hx-trigger="click once"
+          class="quick-edit-trigger flex h-7 w-7 items-center justify-center rounded-md border bg-background/90 text-sm shadow-sm hover:bg-background">
+    <span aria-hidden="true">✎</span>
+  </button>
+  <div x-ref="panel" x-show="open" x-cloak
+       :style="style"
+       class="fixed z-30 w-72 rounded-md border bg-background p-3 text-left shadow-md">
+    <div id="panel-{{ scope }}-{{ book.goodreads_id }}">
+      <p class="text-sm text-muted-foreground">Loading…</p>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,18 @@
+{# Loaned-to control — saves on blur (the default `change` trigger fires when a
+   changed field loses focus) and swaps itself with the server-rendered value.
+   `scope` namespaces the id. Expects `book`, `scope`; a POST may set `saved`/
+   `error`. #}
+<label id="{{ scope }}-loaned-{{ book.goodreads_id }}" class="grid gap-1.5 text-sm">
+  <span class="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+    Loaned to
+    {% if saved %}<span class="save-pulse normal-case tracking-normal text-emerald-600 dark:text-emerald-400">Saved ✓</span>{% endif %}
+  </span>
+  <input class="input" type="text" name="loaned_to" value="{{ book.loaned_to or '' }}"
+         placeholder="Not loaned out"
+         hx-post="/book/{{ book.goodreads_id }}/loaned"
+         hx-vals='{"scope": "{{ scope }}"}'
+         hx-target="#{{ scope }}-loaned-{{ book.goodreads_id }}"
+         hx-swap="outerHTML"
+         hx-trigger="change">
+  {% if error %}<span class="text-xs text-destructive">{{ error }}</span>{% endif %}
+</label>
