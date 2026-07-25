@@ -90,6 +90,65 @@ def _short_au_date(value: object) -> str:
     return text
 
 
+# The exact book fields the JSON API (/api/books and /api/books/{id}) may
+# serialize. It mirrors catalogue._book_result *minus* private_notes: an explicit
+# allowlist, so any column added to _book_result later stays invisible to HTTP
+# callers until it is named here — private-by-default, the same rule the MCP
+# server applies via mcp_server.AGENT_BOOK_FIELDS. Kept as a dedicated web list
+# (rather than reusing AGENT_BOOK_FIELDS) so the API can go on exposing the
+# non-sensitive fields the agent surface intentionally omits — id, cover_url,
+# cover_status, cover_path, timestamps — without coupling the two shapes together.
+# The HTML pages and CLI still use the full _book_result, so this narrows only the
+# JSON API, and only by dropping private_notes.
+API_BOOK_FIELDS = (
+    "id",
+    "goodreads_id",
+    "title",
+    "author",
+    "additional_authors",
+    "isbn10",
+    "isbn13",
+    "publisher",
+    "binding",
+    "number_of_pages",
+    "year_published",
+    "original_publication_year",
+    "rating",
+    "average_rating",
+    "reading_status",
+    "exclusive_shelf",
+    "shelves",
+    "date_read",
+    "date_added",
+    "my_review",
+    "read_count",
+    "owned_copies",
+    "format",
+    "tags",
+    "loaned_to",
+    "local_notes",
+    "description",
+    "subjects",
+    "subject_places",
+    "subject_times",
+    "cover_path",
+    "cover_status",
+    "cover_url",
+    "created_at",
+    "updated_at",
+)
+
+# Guard: fields the JSON API must never serialize, asserted against
+# API_BOOK_FIELDS at import time so a careless edit can't silently re-expose them.
+_FORBIDDEN_API_BOOK_FIELDS = frozenset({"private_notes"})
+assert _FORBIDDEN_API_BOOK_FIELDS.isdisjoint(API_BOOK_FIELDS)
+
+
+def _book_to_api_dict(book: dict[str, object]) -> dict[str, object]:
+    """Project a catalogue record onto the JSON-API allowlist (drops private_notes)."""
+    return {field: book.get(field) for field in API_BOOK_FIELDS}
+
+
 def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> FastAPI:
     """Build a FastAPI app bound to the SQLite database at ``db_path``.
 
@@ -494,7 +553,7 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
     ) -> dict:
         filters = _filters(status, format, tag, author, _rating_param(rating), limit)
         books = _query_books(conn, q, filters)
-        return {"count": len(books), "books": books}
+        return {"count": len(books), "books": [_book_to_api_dict(b) for b in books]}
 
     @app.get("/api/books/{goodreads_id}")
     def api_book(
@@ -504,7 +563,7 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         book = get_book(conn, goodreads_id)
         if book is None:
             raise HTTPException(status_code=404, detail=f"No book for Goodreads ID {goodreads_id}")
-        return book
+        return _book_to_api_dict(book)
 
     def _review_context(conn: sqlite3.Connection) -> dict:
         """Everything the consolidated Review page renders: field conflicts and

@@ -301,6 +301,55 @@ class BookMetadataWebTests(unittest.TestCase):
 
 
 @unittest.skipUnless(_HAS_TESTCLIENT, "fastapi TestClient (httpx) not installed")
+class ApiPrivateNotesLeakGuardTests(unittest.TestCase):
+    """The JSON API must never serialize Goodreads' Private Notes field. It is a
+    known must-not-leak column (the export path strips it at handoff), while the
+    HTML book page and CLI legitimately keep using it. Seed a non-empty
+    private_notes and assert it is absent from both endpoints."""
+
+    def setUp(self) -> None:
+        from adso.web.app import create_app
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self.tmp.name) / "adso.sqlite")
+        conn = db.connect(self.db_path)
+        db.initialize(conn)
+        run = db.create_import_run(
+            conn, source="goodreads", source_path="x.csv", mode="import", row_count=1
+        )
+        db.insert_book_from_goodreads(
+            conn,
+            {"goodreads_id": "1", "title": "The Clockwork Herbarium", "author": "Mara Ellison",
+             "reading_status": "Read", "shelves_json": "[]",
+             "private_notes": "SECRET: do not export or serve over HTTP"},
+            import_run_id=run,
+        )
+        conn.commit()
+        conn.close()
+        self.client = TestClient(create_app(self.db_path))
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_private_notes_absent_from_list_endpoint(self) -> None:
+        response = self.client.get("/api/books")
+        payload = response.json()
+        self.assertEqual(payload["count"], 1)
+        book = payload["books"][0]
+        self.assertNotIn("private_notes", book)
+        # Belt and braces: the value never appears anywhere in the raw body.
+        self.assertNotIn("SECRET", response.text)
+
+    def test_private_notes_absent_from_detail_endpoint(self) -> None:
+        response = self.client.get("/api/books/1")
+        book = response.json()
+        # Sanity: we reached the seeded book, not a 404.
+        self.assertEqual(book["goodreads_id"], "1")
+        self.assertNotIn("private_notes", book)
+        self.assertNotIn("SECRET", response.text)
+
+
+@unittest.skipUnless(_HAS_TESTCLIENT, "fastapi TestClient (httpx) not installed")
 class CatalogueRatingFilterTests(unittest.TestCase):
     def setUp(self) -> None:
         from adso.web.app import create_app
