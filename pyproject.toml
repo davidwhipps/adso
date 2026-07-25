@@ -44,6 +44,11 @@ web = [
   "jinja2>=3.1",
   "python-multipart>=0.0.9",
 ]
+# MCP server for LLM agents (`adso mcp`). The SDK needs Python >=3.10, so it is
+# kept an optional extra rather than a core dependency (core stays at 3.9).
+mcp = [
+  "mcp>=1.2",
+]
 dev = [
   "ruff>=0.4",
   # TestClient needs httpx; without it the web-surface tests silently skip.
