@@ -1,0 +1,17 @@
+{# Quick-edit popover body for the list pages — the same four field partials as
+   the detail card, at a given `scope` (shelf|table). Loaded lazily the first
+   time a pencil is opened. Expects `book`, `scope`, `all_tags`. #}
+<div class="grid gap-4">
+  <header class="border-b pb-2">
+    <p class="line-clamp-2 text-sm font-semibold leading-snug">{{ book.title }}</p>
+    <p class="mt-0.5 text-xs text-muted-foreground">Local catalogue · saves as you edit</p>
+  </header>
+  {% include "_field_format.html" %}
+  {% include "_field_loaned.html" %}
+  <div class="grid gap-1.5 text-sm">
+    <span class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Tags</span>
+    {% include "_local_tags.html" %}
+  </div>
+  {% include "_field_notes.html" %}
+  <a href="/book/{{ book.goodreads_id }}" class="border-t pt-2 text-xs text-muted-foreground hover:text-foreground hover:underline">Open full page →</a>
+</div>

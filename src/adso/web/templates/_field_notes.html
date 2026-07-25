@@ -1,0 +1,18 @@
+{# Local-notes control — saves on blur and swaps itself with the stored value.
+   `scope` namespaces the id and drives the textarea height: the detail card gets
+   a roomy box, the list popover a compact one. Expects `book`, `scope`; a POST
+   may set `saved`/`error`. #}
+<label id="{{ scope }}-notes-{{ book.goodreads_id }}" class="grid gap-1.5 text-sm">
+  <span class="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+    Local notes
+    {% if saved %}<span class="save-pulse normal-case tracking-normal text-emerald-600 dark:text-emerald-400">Saved ✓</span>{% endif %}
+  </span>
+  <textarea class="input leading-relaxed" name="local_notes" rows="{{ 5 if scope == 'detail' else 3 }}"
+            placeholder="Add a private note…"
+            hx-post="/book/{{ book.goodreads_id }}/notes"
+            hx-vals='{"scope": "{{ scope }}"}'
+            hx-target="#{{ scope }}-notes-{{ book.goodreads_id }}"
+            hx-swap="outerHTML"
+            hx-trigger="change">{{ book.local_notes or '' }}</textarea>
+  {% if error %}<span class="text-xs text-destructive">{{ error }}</span>{% endif %}
+</label>

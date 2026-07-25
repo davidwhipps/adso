@@ -12,6 +12,7 @@ import os
 import sqlite3
 import tempfile
 from collections.abc import Iterator
+from datetime import datetime
 from html import escape
 from pathlib import Path
 
@@ -71,6 +72,24 @@ def _placeholder_svg(label: str) -> str:
     )
 
 
+def _short_au_date(value: object) -> str:
+    """Render a stored date as short Australian format (dd/mm/yy).
+
+    Stored dates are ISO-ish strings (yyyy-mm-dd, occasionally yyyy/mm/dd);
+    anything unparseable falls back to the raw string, and empty values render
+    as an em dash.
+    """
+    if not value:
+        return "—"
+    text = str(value).strip()
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(text[:10], fmt).strftime("%d/%m/%y")
+        except ValueError:
+            continue
+    return text
+
+
 def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> FastAPI:
     """Build a FastAPI app bound to the SQLite database at ``db_path``.
 
@@ -107,6 +126,7 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
     templates.env.globals["css_version"] = (
         int(_css_path.stat().st_mtime) if _css_path.exists() else 0
     )
+    templates.env.filters["audate"] = _short_au_date
 
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -278,83 +298,134 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
             "book_detail.html",
             {
                 "book": book,
+                "all_tags": distinct_tags(conn),
                 **_nav_ctx(conn),
             },
         )
 
-    def _local_card(
+    # The local-catalogue fields (format, loaned_to, local_notes, tags) are all
+    # LOCAL_FIELDS, which sync never touches, so editing them is always safe —
+    # db.update_local_fields enforces that boundary (including rejecting unknown
+    # format values). Every field is edited inline and autosaves on change; each
+    # endpoint below re-renders just that one field's fragment.
+    _EDIT_SCOPES = ("detail", "shelf", "table")
+
+    def _scope(scope: str) -> str:
+        # `scope` namespaces the element ids so a book can be edited in several
+        # places at once (detail card, shelf popover, table popover). It rides in
+        # from our own templates, but it lands in ids/hx-attributes, so clamp it
+        # to the known set rather than reflect arbitrary input.
+        return scope if scope in _EDIT_SCOPES else "detail"
+
+    def _field_fragment(
         request: Request,
         conn: sqlite3.Connection,
         goodreads_id: str,
+        template: str,
+        scope: str,
         *,
-        editing: bool = False,
         saved: bool = False,
         error: str | None = None,
+        oob: bool = False,
     ) -> HTMLResponse:
-        """Render the local-catalogue card, read-only or as an edit form."""
+        """Re-render a single local-field control with the stored value."""
         book = get_book(conn, goodreads_id)
         if book is None:
             raise HTTPException(status_code=404, detail=f"No book for Goodreads ID {goodreads_id}")
-        template = "_local_fields_form.html" if editing else "_local_fields.html"
         return templates.TemplateResponse(
-            request, template, {"book": book, "saved": saved, "error": error}
+            request,
+            template,
+            {"book": book, "scope": _scope(scope), "saved": saved, "error": error, "oob": oob},
         )
 
-    @app.get("/book/{goodreads_id}/local", response_class=HTMLResponse)
-    def local_fields(
+    @app.get("/book/{goodreads_id}/local/panel", response_class=HTMLResponse)
+    def local_panel(
         request: Request,
         goodreads_id: str,
         conn: sqlite3.Connection = Depends(get_conn),
+        scope: str = Query("shelf"),
     ) -> HTMLResponse:
-        return _local_card(request, conn, goodreads_id)
+        """The quick-edit popover body for a list item, loaded lazily on open."""
+        book = get_book(conn, goodreads_id)
+        if book is None:
+            raise HTTPException(status_code=404, detail=f"No book for Goodreads ID {goodreads_id}")
+        return templates.TemplateResponse(
+            request,
+            "_local_panel.html",
+            {"book": book, "scope": _scope(scope), "all_tags": distinct_tags(conn)},
+        )
 
-    @app.get("/book/{goodreads_id}/local/edit", response_class=HTMLResponse)
-    def local_fields_edit(
-        request: Request,
-        goodreads_id: str,
-        conn: sqlite3.Connection = Depends(get_conn),
-    ) -> HTMLResponse:
-        return _local_card(request, conn, goodreads_id, editing=True)
-
-    @app.post("/book/{goodreads_id}/local", response_class=HTMLResponse)
-    def local_fields_save(
+    @app.post("/book/{goodreads_id}/format", response_class=HTMLResponse)
+    def local_format(
         request: Request,
         goodreads_id: str,
         conn: sqlite3.Connection = Depends(get_conn),
         format: str | None = Form(None),
-        loaned_to: str | None = Form(None),
-        local_notes: str | None = Form(None),
+        scope: str = Form("detail"),
     ) -> HTMLResponse:
-        # These are all LOCAL_FIELDS, which sync never touches, so editing them is
-        # always safe — db.update_local_fields enforces that boundary (including
-        # rejecting unknown format values). Tags are edited inline via the
-        # /tags/add and /tags/remove endpoints, so this form deliberately leaves
-        # tags_json untouched.
-        def _clean(value: str | None) -> str | None:
-            value = (value or "").strip()
-            return value or None
-
-        updates = {
-            "format": _clean(format),
-            "loaned_to": _clean(loaned_to),
-            "local_notes": (local_notes or "").strip() or None,
-        }
+        # Always emit the out-of-band table-cell swap so the Format badge on the
+        # list stays in sync, whether the save took or was rejected.
         try:
-            db.update_local_fields(conn, goodreads_id, updates)
+            db.update_local_fields(conn, goodreads_id, {"format": (format or "").strip() or None})
         except ValueError as exc:
-            return _local_card(request, conn, goodreads_id, editing=True, error=str(exc))
-        return _local_card(request, conn, goodreads_id, saved=True)
+            return _field_fragment(
+                request, conn, goodreads_id, "_field_format.html", scope, error=str(exc), oob=True
+            )
+        return _field_fragment(
+            request, conn, goodreads_id, "_field_format.html", scope, saved=True, oob=True
+        )
+
+    @app.post("/book/{goodreads_id}/loaned", response_class=HTMLResponse)
+    def local_loaned(
+        request: Request,
+        goodreads_id: str,
+        conn: sqlite3.Connection = Depends(get_conn),
+        loaned_to: str | None = Form(None),
+        scope: str = Form("detail"),
+    ) -> HTMLResponse:
+        try:
+            db.update_local_fields(
+                conn, goodreads_id, {"loaned_to": (loaned_to or "").strip() or None}
+            )
+        except ValueError as exc:
+            return _field_fragment(
+                request, conn, goodreads_id, "_field_loaned.html", scope, error=str(exc)
+            )
+        return _field_fragment(request, conn, goodreads_id, "_field_loaned.html", scope, saved=True)
+
+    @app.post("/book/{goodreads_id}/notes", response_class=HTMLResponse)
+    def local_notes(
+        request: Request,
+        goodreads_id: str,
+        conn: sqlite3.Connection = Depends(get_conn),
+        local_notes: str | None = Form(None),
+        scope: str = Form("detail"),
+    ) -> HTMLResponse:
+        try:
+            db.update_local_fields(
+                conn, goodreads_id, {"local_notes": (local_notes or "").strip() or None}
+            )
+        except ValueError as exc:
+            return _field_fragment(
+                request, conn, goodreads_id, "_field_notes.html", scope, error=str(exc)
+            )
+        return _field_fragment(request, conn, goodreads_id, "_field_notes.html", scope, saved=True)
 
     def _tags_fragment(
         request: Request,
         conn: sqlite3.Connection,
         goodreads_id: str,
+        scope: str,
     ) -> HTMLResponse:
-        """Re-render just the editable tag chips (the Tags <dd>)."""
+        """Re-render just the editable tag chips for one scope."""
         book = get_book(conn, goodreads_id)
         if book is None:
             raise HTTPException(status_code=404, detail=f"No book for Goodreads ID {goodreads_id}")
-        return templates.TemplateResponse(request, "_local_tags.html", {"book": book})
+        return templates.TemplateResponse(
+            request,
+            "_local_tags.html",
+            {"book": book, "scope": _scope(scope), "all_tags": distinct_tags(conn)},
+        )
 
     @app.post("/book/{goodreads_id}/tags/add", response_class=HTMLResponse)
     def tag_add(
@@ -362,6 +433,7 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         goodreads_id: str,
         conn: sqlite3.Connection = Depends(get_conn),
         tag: str | None = Form(None),
+        scope: str = Form("detail"),
     ) -> HTMLResponse:
         book = get_book(conn, goodreads_id)
         if book is None:
@@ -369,7 +441,7 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         # Append the raw input; update_local_fields runs normalize_tags, which
         # lowercases, trims, and dedupes — so a blank or duplicate is a no-op.
         db.update_local_fields(conn, goodreads_id, {"tags_json": [*book["tags"], tag or ""]})
-        return _tags_fragment(request, conn, goodreads_id)
+        return _tags_fragment(request, conn, goodreads_id, scope)
 
     @app.post("/book/{goodreads_id}/tags/remove", response_class=HTMLResponse)
     def tag_remove(
@@ -377,6 +449,7 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         goodreads_id: str,
         conn: sqlite3.Connection = Depends(get_conn),
         tag: str = Form(...),
+        scope: str = Form("detail"),
     ) -> HTMLResponse:
         book = get_book(conn, goodreads_id)
         if book is None:
@@ -386,7 +459,7 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         target = db.normalize_tags(tag)
         remaining = [t for t in book["tags"] if [t] != target]
         db.update_local_fields(conn, goodreads_id, {"tags_json": remaining})
-        return _tags_fragment(request, conn, goodreads_id)
+        return _tags_fragment(request, conn, goodreads_id, scope)
 
     @app.get("/covers/{goodreads_id}")
     def cover(

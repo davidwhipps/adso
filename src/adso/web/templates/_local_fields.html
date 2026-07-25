@@ -1,24 +1,20 @@
-{# Local-catalogue card: read view with an Edit toggle. Swapped in place. #}
-<div id="local-card" class="card">
-  <header class="flex items-center justify-between">
-    <h2>Local catalogue</h2>
-    <div class="flex items-center gap-2">
-      {% if saved %}<span class="badge">Saved</span>{% endif %}
-      <button class="btn-sm-outline"
-              hx-get="/book/{{ book.goodreads_id }}/local/edit"
-              hx-target="#local-card"
-              hx-swap="outerHTML">Edit</button>
-    </div>
-  </header>
+{# Local-catalogue card on the book detail page: every field is always live and
+   autosaves on change — no edit/save toggle. The same field partials power the
+   list-page quick-edit popover (see _local_panel.html); only this container
+   differs. Expects `book`, `all_tags`. #}
+{% set scope = "detail" %}
+<div class="card">
+  <header><h2>Local catalogue</h2></header>
   <section>
-    <p class="mb-3 text-xs text-muted-foreground">Local only — yours, never synced to Goodreads.</p>
-    <dl class="grid grid-cols-[8rem_1fr] gap-y-2 text-sm">
-      <dt class="text-muted-foreground">Format</dt>
-      <dd>{% if book["format"] %}<span class="badge">{{ book["format"] | capitalize }}</span>{% else %}<span class="badge-outline">not owned</span>{% endif %}</dd>
-      <dt class="text-muted-foreground">Tags</dt>
-      {% include "_local_tags.html" %}
-      <dt class="text-muted-foreground">Loaned to</dt><dd>{{ book.loaned_to or "—" }}</dd>
-      <dt class="text-muted-foreground">Local notes</dt><dd class="whitespace-pre-line">{{ book.local_notes or "—" }}</dd>
-    </dl>
+    <p class="mb-5 text-xs text-muted-foreground">Local only — yours, never synced to Goodreads. Changes save as you make them.</p>
+    <div class="grid gap-5">
+      {% include "_field_format.html" %}
+      {% include "_field_loaned.html" %}
+      <div class="grid gap-1.5 text-sm">
+        <span class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Tags</span>
+        {% include "_local_tags.html" %}
+      </div>
+      {% include "_field_notes.html" %}
+    </div>
   </section>
 </div>

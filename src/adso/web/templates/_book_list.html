@@ -1,8 +1,14 @@
 {# Shared book list for the Catalogue and To Read pages: a shelf grid / table
    toggle persisted in localStorage. Render only when `books` is non-empty; each
-   page supplies its own empty state. Pass show_status_column=False to hide the
-   table's Status column (the To Read page, where every book is want-to-read). #}
-{% set show_status_column = show_status_column if show_status_column is defined else True %}
+   page supplies its own empty state.
+
+   The table drops the Status column (redundant: the Catalogue excludes to-read,
+   the To Read page is entirely want-to-read). `show_read_columns` adds the
+   read-only-relevant columns — My rating (stars) and Date read — which make no
+   sense on the To Read page; it defaults True and to_read.html sets it False.
+   Average rating and Date added show on both. #}
+{% from "_stars.html" import stars %}
+{% set show_read_columns = show_read_columns if show_read_columns is defined else True %}
 <div
   x-data="{ view: localStorage.getItem('adso_view') || 'shelf', set(v){ this.view = v; localStorage.setItem('adso_view', v) } }"
   x-cloak>
@@ -28,15 +34,20 @@
     class="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
     {% for book in books %}
     {% if book.goodreads_id %}
-    <a href="/book/{{ book.goodreads_id }}" class="group block">
-      <img
-        src="{{ book.cover_url }}"
-        loading="lazy"
-        alt="Cover of {{ book.title }}"
-        class="aspect-[2/3] w-full rounded-lg border bg-muted object-cover">
-      <p class="mt-2 line-clamp-2 text-sm font-medium group-hover:underline">{{ book.title }}</p>
-      <p class="line-clamp-1 text-xs text-muted-foreground">{{ book.author or "" }}</p>
-    </a>
+    <div class="group relative">
+      <a href="/book/{{ book.goodreads_id }}" class="block">
+        <img
+          src="{{ book.cover_url }}"
+          loading="lazy"
+          alt="Cover of {{ book.title }}"
+          class="aspect-[2/3] w-full rounded-lg border bg-muted object-cover">
+        <p class="mt-2 line-clamp-2 text-sm font-medium group-hover:underline">{{ book.title }}</p>
+        <p class="line-clamp-1 text-xs text-muted-foreground">{{ book.author or "" }}</p>
+      </a>
+      <div class="absolute right-1.5 top-1.5">
+        {% with scope = "shelf" %}{% include "_quickedit.html" %}{% endwith %}
+      </div>
+    </div>
     {% else %}
     <div class="block">
       <div class="flex aspect-[2/3] w-full items-center justify-center rounded-lg border bg-muted text-muted-foreground">?</div>
@@ -48,20 +59,24 @@
   </div>
 
   <!-- Table -->
-  <div x-show="view === 'table'" class="overflow-hidden rounded-lg border">
+  <div x-show="view === 'table'" class="overflow-x-auto rounded-lg border">
     <table class="table">
       <thead class="bg-muted/50">
         <tr>
           <th class="w-12"></th>
           <th>Title</th>
           <th>Author</th>
-          {% if show_status_column %}<th>Status</th>{% endif %}
           <th>Format</th>
+          {% if show_read_columns %}<th>My rating</th>{% endif %}
+          <th>Avg</th>
+          {% if show_read_columns %}<th>Date read</th>{% endif %}
+          <th>Date added</th>
+          <th class="w-10"></th>
         </tr>
       </thead>
       <tbody>
         {% for book in books %}
-        <tr>
+        <tr class="group">
           <td>
             {% if book.goodreads_id %}
             <img
@@ -79,18 +94,29 @@
             {% endif %}
           </td>
           <td class="text-muted-foreground">{{ book.author or "" }}</td>
-          {% if show_status_column %}
-          <td>
-            {% if book.reading_status %}
-            <span class="badge-secondary">{{ book.reading_status }}</span>
+          {# On the To Read page most books are unowned, so mute the whole Format
+             column (via .format-muted) to keep it quiet — CSS on this cell
+             survives the OOB badge swap after a quick edit. #}
+          <td {% if not show_read_columns %}class="format-muted"{% endif %}>
+            {% if book.goodreads_id %}
+            <span id="row-format-{{ book.goodreads_id }}">{% include "_format_badge.html" %}</span>
+            {% else %}
+            {% include "_format_badge.html" %}
             {% endif %}
           </td>
+          {% if show_read_columns %}
+          <td class="whitespace-nowrap">
+            {% if book.rating %}{{ stars(book.rating) }}{% else %}<span class="text-muted-foreground">—</span>{% endif %}
+          </td>
           {% endif %}
+          <td class="tabular-nums text-muted-foreground">{{ book.average_rating if book.average_rating else "—" }}</td>
+          {% if show_read_columns %}
+          <td class="whitespace-nowrap tabular-nums text-muted-foreground">{{ book.date_read | audate }}</td>
+          {% endif %}
+          <td class="whitespace-nowrap tabular-nums text-muted-foreground">{{ book.date_added | audate }}</td>
           <td>
-            {% if book["format"] %}
-            <span class="badge">{{ book["format"] | capitalize }}</span>
-            {% else %}
-            <span class="badge-outline">not owned</span>
+            {% if book.goodreads_id %}
+            {% with scope = "table" %}{% include "_quickedit.html" %}{% endwith %}
             {% endif %}
           </td>
         </tr>

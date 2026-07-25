@@ -78,8 +78,8 @@
         <dd>{% if book.rating is not none and book.rating %}<span class="inline-flex items-center gap-2">{{ stars(book.rating) }}<span class="text-muted-foreground">{{ book.rating }}</span></span>{% else %}—{% endif %}</dd>
         <dt class="text-muted-foreground">Average</dt>
         <dd>{% if book.average_rating %}<span class="inline-flex items-center gap-2">{{ stars(book.average_rating, muted=True) }}<span class="text-muted-foreground">{{ book.average_rating }}</span></span>{% else %}—{% endif %}</dd>
-        <dt class="text-muted-foreground">Date read</dt><dd>{{ book.date_read or "—" }}</dd>
-        <dt class="text-muted-foreground">Date added</dt><dd>{{ book.date_added or "—" }}</dd>
+        <dt class="text-muted-foreground">Date read</dt><dd>{{ book.date_read | audate }}</dd>
+        <dt class="text-muted-foreground">Date added</dt><dd>{{ book.date_added | audate }}</dd>
         <dt class="text-muted-foreground">Review</dt><dd class="whitespace-pre-line">{{ book.my_review or "—" }}</dd>
       </dl>
     </section>

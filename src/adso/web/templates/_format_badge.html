@@ -1,0 +1,3 @@
+{# The Format value as a badge — shared by the table cell and the out-of-band
+   swap that keeps that cell live after a quick edit. Expects `book`. #}
+{% if book["format"] %}<span class="badge">{{ book["format"] | capitalize }}</span>{% else %}<span class="badge-outline">not owned</span>{% endif %}

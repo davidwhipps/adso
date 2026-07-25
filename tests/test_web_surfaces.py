@@ -130,11 +130,20 @@ class BookLocalEditWebTests(unittest.TestCase):
         conn.close()
         return value
 
-    def test_detail_shows_editable_local_card(self) -> None:
+    def test_detail_shows_always_live_local_card(self) -> None:
+        # No edit/save toggle: the detail card posts each field to its own
+        # autosave endpoint, and tags autocomplete from a datalist.
         body = self.client.get("/book/1").text
         self.assertIn("Local catalogue", body)
-        self.assertIn("/book/1/local/edit", body)
         self.assertIn("never synced to Goodreads", body)
+        self.assertIn('hx-post="/book/1/format"', body)
+        self.assertIn('hx-post="/book/1/loaned"', body)
+        self.assertIn('hx-post="/book/1/notes"', body)
+        # Tags autocomplete from existing tags, seeded into the input component.
+        self.assertIn('hx-post="/book/1/tags/add"', body)
+        self.assertIn("data-tags=", body)
+        # The old explicit edit form is gone.
+        self.assertNotIn("/book/1/local/edit", body)
 
     def _tags(self) -> str:
         conn = db.connect(self.db_path)
@@ -142,22 +151,26 @@ class BookLocalEditWebTests(unittest.TestCase):
         conn.close()
         return value
 
-    def test_edit_form_renders_all_fields(self) -> None:
-        # Tags are edited inline (see tag add/remove), not via this form.
-        body = self.client.get("/book/1/local/edit").text
+    def test_detail_renders_all_local_controls(self) -> None:
+        # Tags are edited inline as chips (name="tag"), not a form field
+        # named "tags".
+        body = self.client.get("/book/1").text
         for name in ("format", "loaned_to", "local_notes"):
             self.assertIn(f'name="{name}"', body)
         self.assertNotIn('name="tags"', body)
         for value in ("physical", "ebook", "audiobook"):
             self.assertIn(f'value="{value}"', body)
 
-    def test_save_updates_local_fields_and_confirms(self) -> None:
-        body = self.client.post(
-            "/book/1/local",
-            data={"format": "ebook", "loaned_to": "Sam", "local_notes": "Signed"},
-        ).text
-        self.assertIn("Saved", body)
-        self.assertIn("Ebook", body)
+    def test_each_field_autosaves_and_confirms(self) -> None:
+        fmt = self.client.post("/book/1/format", data={"format": "ebook"}).text
+        self.assertIn("Saved", fmt)
+        self.assertIn("Ebook", fmt)
+        loaned = self.client.post("/book/1/loaned", data={"loaned_to": "Sam"}).text
+        self.assertIn("Saved", loaned)
+        self.assertIn("Sam", loaned)
+        notes = self.client.post("/book/1/notes", data={"local_notes": "Signed"}).text
+        self.assertIn("Saved", notes)
+        self.assertIn("Signed", notes)
         conn = db.connect(self.db_path)
         book = db.get_book_by_goodreads_id(conn, "1")
         self.assertEqual(
@@ -166,10 +179,39 @@ class BookLocalEditWebTests(unittest.TestCase):
         )
         conn.close()
 
-    def test_save_local_fields_leaves_tags_untouched(self) -> None:
+    def test_format_save_emits_oob_table_cell(self) -> None:
+        # The Format endpoint also re-renders the list table's Format badge out
+        # of band so an edit from a list popover stays in sync.
+        body = self.client.post("/book/1/format", data={"format": "ebook"}).text
+        self.assertIn('id="row-format-1"', body)
+        self.assertIn('hx-swap-oob="true"', body)
+
+    def test_field_save_leaves_other_fields_untouched(self) -> None:
+        # Each endpoint writes only its own field, so tags survive a format edit.
         self.client.post("/book/1/tags/add", data={"tag": "Philosophy"})
-        self.client.post("/book/1/local", data={"format": "ebook", "local_notes": "x"})
+        self.client.post("/book/1/format", data={"format": "ebook"})
+        self.client.post("/book/1/notes", data={"local_notes": "x"})
         self.assertEqual(self._tags(), '["philosophy"]')
+
+    def test_quick_edit_panel_renders_scoped_controls(self) -> None:
+        body = self.client.get("/book/1/local/panel", params={"scope": "shelf"}).text
+        self.assertIn('id="shelf-format-1"', body)
+        self.assertIn('name="local_notes"', body)
+        self.assertIn('id="shelf-tags-1"', body)
+
+    def test_unknown_scope_is_clamped(self) -> None:
+        # `scope` lands in element ids/attributes, so an unknown value falls back
+        # to "detail" rather than being reflected verbatim.
+        body = self.client.post(
+            "/book/1/format", data={"format": "ebook", "scope": "../evil"}
+        ).text
+        self.assertIn('id="detail-format-1"', body)
+        self.assertNotIn("evil", body)
+
+    def test_catalogue_offers_quick_edit_trigger(self) -> None:
+        body = self.client.get("/").text
+        self.assertIn("Quick edit T", body)
+        self.assertIn("/book/1/local/panel?scope=shelf", body)
 
     def test_tag_add_appends_and_normalises(self) -> None:
         body = self.client.post("/book/1/tags/add", data={"tag": "Philosophy"}).text
@@ -193,21 +235,24 @@ class BookLocalEditWebTests(unittest.TestCase):
         self.assertEqual(self._tags(), '["medieval"]')
 
     def test_empty_format_clears_to_not_owned(self) -> None:
-        self.client.post("/book/1/local", data={"format": "physical"})
+        self.client.post("/book/1/format", data={"format": "physical"})
         self.assertEqual(self._format(), "physical")
         # The blank "— Not owned" option posts an empty string.
-        self.client.post("/book/1/local", data={"format": ""})
+        self.client.post("/book/1/format", data={"format": ""})
         self.assertIsNone(self._format())
 
     def test_invalid_format_shows_error_and_keeps_value(self) -> None:
-        self.client.post("/book/1/local", data={"format": "physical"})
-        body = self.client.post("/book/1/local", data={"format": "hardcover"}).text
-        self.assertIn("alert-destructive", body)
+        self.client.post("/book/1/format", data={"format": "physical"})
+        body = self.client.post("/book/1/format", data={"format": "hardcover"}).text
+        self.assertIn("text-destructive", body)
         self.assertIn("Unsupported format", body)
         self.assertEqual(self._format(), "physical")
 
     def test_edit_missing_book_is_404(self) -> None:
-        self.assertEqual(self.client.get("/book/nope/local/edit").status_code, 404)
+        self.assertEqual(
+            self.client.post("/book/nope/format", data={"format": "ebook"}).status_code, 404
+        )
+        self.assertEqual(self.client.get("/book/nope/local/panel").status_code, 404)
 
 
 @unittest.skipUnless(_HAS_TESTCLIENT, "fastapi TestClient (httpx) not installed")
@@ -309,6 +354,23 @@ class CatalogueRatingFilterTests(unittest.TestCase):
 
         payload = self.client.get("/api/books", params={"rating": ""}).json()
         self.assertEqual(payload["count"], 2)
+
+
+class ShortAuDateTests(unittest.TestCase):
+    def test_iso_dates_render_as_short_australian(self) -> None:
+        from adso.web.app import _short_au_date
+
+        self.assertEqual(_short_au_date("2013-09-14"), "14/09/13")
+        # Goodreads occasionally stores slash-separated dates.
+        self.assertEqual(_short_au_date("2021/02/05"), "05/02/21")
+
+    def test_empty_is_em_dash_and_unparseable_passes_through(self) -> None:
+        from adso.web.app import _short_au_date
+
+        self.assertEqual(_short_au_date(""), "—")
+        self.assertEqual(_short_au_date(None), "—")
+        # A partial/odd value is shown as-is rather than dropped.
+        self.assertEqual(_short_au_date("2019"), "2019")
 
 
 if __name__ == "__main__":
