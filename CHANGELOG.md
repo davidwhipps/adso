@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **MCP server** (`adso mcp`): serve the catalogue to LLM agents (Claude Desktop,
+  Claude Code) over stdio. Eight tools — `search_books`, `get_book`,
+  `library_stats`, `list_facets`, plus curated writes `add_tags`, `remove_tags`,
+  `set_format`, `set_loaned`. Output is built from an explicit allowlist so
+  `private_notes` (and any future column) is never exposed; writes reach only the
+  local fields sync never overwrites, and `local_notes` stays read-only. Install
+  with the optional extra: `pip install -e '.[mcp]'`. See `docs/agents/mcp.md`.
 - Web UI: edit your **local catalogue fields** inline on a book's page —
   local-only, never synced to Goodreads.
 - Conflict decisions now support **ignore** and **review-later** alongside

@@ -99,6 +99,9 @@ def _dispatch(args, parser) -> int:
             open_browser=not args.no_browser,
         )
 
+    if args.command == "mcp":
+        return _run_mcp(cfg.db_path)
+
     conn = db.connect(cfg.db_path)
     try:
         if args.command == "init":
@@ -303,6 +306,23 @@ def _run_server(
     return 0
 
 
+def _run_mcp(db_path: str) -> int:
+    from .mcp_server import run_stdio
+
+    # Make sure the catalogue file exists and is initialized before serving.
+    conn = db.connect(db_path)
+    db.initialize(conn)
+    conn.close()
+
+    try:
+        return run_stdio(db_path)
+    except ModuleNotFoundError as exc:
+        raise AdsoError(
+            "The MCP server needs extra dependencies.",
+            hint="Install them with: pip install -e '.[mcp]'",
+        ) from exc
+
+
 class _BrandedParser(argparse.ArgumentParser):
     """Top-level parser whose `--help` renders the branded Adso help screen.
 
@@ -344,6 +364,11 @@ def _build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--host", default="127.0.0.1", help="Host to bind (default: 127.0.0.1)")
     serve_parser.add_argument("--port", type=int, default=8000, help="Port to bind (default: 8000)")
     serve_parser.add_argument("--no-browser", action="store_true", help="Do not open a browser window")
+
+    subparsers.add_parser(
+        "mcp",
+        help="Run the MCP server over stdio so LLM agents can query the catalogue",
+    )
 
     list_parser = subparsers.add_parser("list", help="List books in the local catalogue")
     list_parser.add_argument("--status", help="Filter by reading status, e.g. 'Read' or 'To Read'")
