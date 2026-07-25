@@ -18,7 +18,7 @@ Stay on Goodreads for the network, but keep a synced copy in Adso that is yours.
 
 It follows the ["file over app"](https://stephango.com/file-over-app) idea coined by Obsidian CEO, Steph Ango. In this case, a single [SQLite](https://www.sqlite.org/) file is one of the longest-lived formats there is to store your catalogue — and it's lightning fast because it's local. Your whole library is one file on disk: search is instant, everything works offline, and it's yours to query, script, or back up however you like.
 
-v1 is CLI-first and SQLite-backed. Because every interface is just an adapter over that one canonical catalogue, the same core powers what's next without rewriting the sync model: a **local web UI** (v2 — where visual conflict resolution lives), catalogue **enrichment** and **duplicate cleanup**, **more connectors** beyond Goodreads and Notion, and an **assistant layer** for audits and recommendations.
+v1 is CLI-first and SQLite-backed. Because every interface is just an adapter over that one canonical catalogue, the same core powers what's next without rewriting the sync model: a **local web UI** (v2 — where visual conflict resolution lives), catalogue **enrichment** and **duplicate cleanup**, **more connectors** beyond Goodreads and Notion, and an **assistant layer** for audits and recommendations — the first step of which, an [AI-agent interface over MCP](#talk-to-your-library-with-an-ai-agent-mcp), is here now.
 
 ## Quick Start
 
@@ -59,10 +59,10 @@ The core CLI has **no required runtime dependencies** — it installs with nothi
 pipx install "git+https://github.com/davidwhipps/adso.git"
 ```
 
-Optional features each add their own extra (these need **Python 3.10+**): `covers` for cover art, `web` for the local web UI, `notion` for Notion export. Add them in the install:
+Optional features each add their own extra (these need **Python 3.10+**): `covers` for cover art, `web` for the local web UI, `notion` for Notion export, `mcp` for the [AI-agent (MCP) server](#talk-to-your-library-with-an-ai-agent-mcp). Add them in the install:
 
 ```bash
-pipx install "adso[web,covers,notion] @ git+https://github.com/davidwhipps/adso.git"
+pipx install "adso[web,covers,notion,mcp] @ git+https://github.com/davidwhipps/adso.git"
 ```
 
 **From a clone** (or if you'd rather manage your own environment), use a virtual environment so Adso's dependencies stay isolated:
@@ -121,6 +121,42 @@ adso set-cover GOODREADS_ID --url https://example.com/cover.jpg
 ```
 
 Covers resolve from free public APIs (Open Library, then Apple Books) — no account or key needed — and are fetched automatically after import/sync (pass `--no-covers` to skip). A manual cover is never overwritten by an automatic fetch.
+
+## Talk to your library with an AI agent (MCP)
+
+Because the catalogue is just one local SQLite file, it's easy to hand to an LLM agent. Adso speaks the [Model Context Protocol](https://modelcontextprotocol.io) (MCP), so an agent — Claude Code, Claude Desktop, or any MCP client — can query and lightly curate your library in plain language: *"what unread sci-fi do I own in physical?"*, *"summarise my shelf"*, *"tag everything by Le Guin as favourites"*.
+
+It runs entirely **locally over stdio**, reading the same canonical SQLite file directly — no server to host, no account, and nothing leaves your machine.
+
+```bash
+pip install ".[mcp]"
+adso mcp                                   # stdio MCP server — clients spawn this for you
+```
+
+Register it with **Claude Code**:
+
+```bash
+claude mcp add adso -- adso --profile personal mcp
+```
+
+…or add it to **Claude Desktop**'s config (Settings → Developer → Edit Config):
+
+```json
+{
+  "mcpServers": {
+    "adso": { "command": "adso", "args": ["--profile", "personal", "mcp"] }
+  }
+}
+```
+
+**Eight tools, safe by design.** The agent can search the catalogue, fetch a book, summarise your library, and list your shelves, tags, and formats — plus four curated writes: add/remove tags, set a book's owned format, and record a loan. The guardrails matter as much as the tools:
+
+- **Private by default.** Tool output is assembled from an explicit allowlist, so your Goodreads *private notes* — and any field added to the schema later — are never exposed to the agent. It is deliberately not a "return every column" dump.
+- **Your own notes are read-only.** Your `local notes` are visible to the agent but there's no tool to overwrite them, so prose you wrote yourself stays safe.
+- **Writes touch only your local fields** (tags, format, loaned-to) — the ones sync never overwrites. Imports, sync, conflict resolution, and duplicate merges are all off-limits.
+- **You approve every action.** MCP clients prompt for confirmation before running any tool; the canonical SQLite catalogue stays the source of truth.
+
+Needs **Python 3.10+** (the `mcp` extra).
 
 ## Optional & experimental
 
