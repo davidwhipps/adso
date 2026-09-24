@@ -105,6 +105,9 @@ def _dispatch(args, parser) -> int:
     if args.command == "service":
         return _run_service(args, cfg)
 
+    if args.command == "goodreads":
+        return _run_goodreads(args, cfg)
+
     conn = db.connect(cfg.db_path)
     try:
         if args.command == "init":
@@ -136,16 +139,7 @@ def _dispatch(args, parser) -> int:
         # later refresh). Both must surface conflicts — earlier, `import` recorded
         # conflicts in the database but wrote no report, so they passed silently.
         if args.command in ("import", "sync") and args.source == "goodreads":
-            summary = import_goodreads_csv(conn, args.csv, mode=args.command)
-            print(latest_sync_summary_markdown(conn))
-            if summary.conflicts:
-                output = Path("reports") / f"conflicts-import-{summary.import_run_id}.md"
-                write_latest_conflicts(conn, output)
-                print(f"Conflict report: {output}")
-            if not args.no_covers:
-                _auto_fetch_covers(conn, cfg.db_path)
-            if not args.no_metadata:
-                _auto_fetch_metadata(conn)
+            _sync_goodreads(conn, cfg, args.csv, mode=args.command, args=args)
             return 0
 
         if args.command == "fetch-covers":
@@ -272,8 +266,130 @@ def _dispatch(args, parser) -> int:
         conn.close()
 
 
+def _sync_goodreads(conn, cfg: ResolvedConfig, csv_path, *, mode: str, args):
+    summary = import_goodreads_csv(conn, csv_path, mode=mode)
+    print(latest_sync_summary_markdown(conn))
+    if summary.conflicts:
+        output = Path("reports") / f"conflicts-import-{summary.import_run_id}.md"
+        write_latest_conflicts(conn, output)
+        print(f"Conflict report: {output}")
+    if not args.no_covers:
+        _auto_fetch_covers(conn, cfg.db_path)
+    if not args.no_metadata:
+        _auto_fetch_metadata(conn)
+    return summary
+
+
+def _run_goodreads(args, cfg: ResolvedConfig) -> int:
+    from . import goodreads_watch
+
+    if args.action == "open":
+        goodreads_watch.open_export_page()
+        print(f"Opened {goodreads_watch.EXPORT_URL}; click Export Library, then download the file.")
+        return 0
+    if args.action == "remind":
+        goodreads_watch.remind()
+        return 0
+
+    # ingest
+    if hasattr(sys.stdout, "reconfigure"):
+        # Under launchd stdout is a log file; flush per line so the log is live
+        # while the post-sync cover/metadata fetch runs.
+        sys.stdout.reconfigure(line_buffering=True)
+    watch_dir = Path(args.watch_dir) if args.watch_dir else goodreads_watch.default_watch_dir()
+    try:
+        goodreads_watch.check_readable(watch_dir)
+        exports = []
+        for path in goodreads_watch.find_exports(watch_dir):
+            if path.stat().st_size == 0:
+                continue  # still downloading (Firefox creates the file first)
+            if not goodreads_watch.is_goodreads_export(path):
+                print(f"Skipping {path}: not a Goodreads library export.")
+                continue
+            exports.append(path)
+        if not exports:
+            print(f"No Goodreads export waiting in {watch_dir}.")
+            return 0
+
+        # Move every waiting export out of the watch folder *before* syncing, so
+        # a failed sync (or a skipped stale file) can't re-trigger on each later
+        # change to the folder.
+        last_sync = goodreads_watch.last_sync_time(cfg.db_path)
+        fresh = [p for p in exports if not goodreads_watch.is_stale(p, last_sync)]
+        stale = [p for p in exports if goodreads_watch.is_stale(p, last_sync)]
+        archive_dir = _data_dir(cfg.db_path) / "exports" / "goodreads"
+        for path in stale:
+            filed = goodreads_watch.archive(path, archive_dir)
+            print(
+                f"Skipped {path.name}: downloaded before the last sync, so it's older than "
+                f"the catalogue. Filed as {filed}; sync it by hand with "
+                f"`adso sync goodreads {filed}` if you really mean to."
+            )
+        if not fresh:
+            if args.notify:
+                goodreads_watch.notify(
+                    f"Skipped {len(stale)} old Goodreads export(s), downloaded before your "
+                    "last sync. Nothing changed."
+                )
+            return 0
+        archived = [goodreads_watch.archive(path, archive_dir) for path in fresh]
+        csv_path = archived[-1]  # newest
+        print(f"Filed Goodreads export as {csv_path}")
+
+        backup = goodreads_watch.backup_db(cfg.db_path)
+        if backup:
+            print(f"Backed up catalogue to {backup}")
+        conn = db.connect(cfg.db_path)
+        try:
+            db.initialize(conn)
+            summary = _sync_goodreads(conn, cfg, csv_path, mode="sync", args=args)
+        finally:
+            conn.close()
+    except (AdsoError, sqlite3.DatabaseError, OSError) as exc:
+        if args.notify:
+            goodreads_watch.notify(f"Goodreads sync failed: {exc}")
+        raise
+
+    if args.notify:
+        message = f"Goodreads sync: {summary.created} new, {summary.updated} updated"
+        if summary.conflicts:
+            message += f", {summary.conflicts} conflicts to review"
+        goodreads_watch.notify(message)
+    return 0
+
+
 def _run_service(args, cfg: ResolvedConfig) -> int:
     from . import service
+
+    if args.action == "install-sync":
+        from . import goodreads_watch
+
+        if args.watch_dir:
+            watch_dir = Path(args.watch_dir).expanduser()
+        else:
+            watch_dir = goodreads_watch.default_watch_dir()
+        service.install_sync(
+            db_path=cfg.db_path,
+            working_dir=Path.cwd(),
+            watch_dir=watch_dir,
+            day=args.day,
+            hour=args.hour,
+            reminder=not args.no_reminder,
+        )
+        info = service.sync_status()
+        print(f"Adso now syncs any Goodreads export saved to {info['watch_dir']}.")
+        if info["reminder"]:
+            print(f"Reminder to export: {info['reminder']}.")
+        print(f"Catalogue: {Path(cfg.db_path).resolve()}")
+        print(f"Log: {info['log']}")
+        print("Try it: `adso goodreads open`, click Export Library, and download the file.")
+        return 0
+    if args.action == "uninstall-sync":
+        if service.uninstall_sync():
+            print("Goodreads auto-sync removed.")
+        else:
+            print("Goodreads auto-sync was not installed.")
+        return 0
 
     if args.action == "install":
         url = service.install(db_path=cfg.db_path, port=args.port, working_dir=Path.cwd())
@@ -295,6 +411,7 @@ def _run_service(args, cfg: ResolvedConfig) -> int:
     info = service.status()
     if not info["installed"]:
         print("Adso service: not installed (run `adso service install`).")
+        _print_sync_status(service)
         return 0
     state = f"running (pid {info['pid']})" if info.get("pid") else (
         "loaded, not running" if info["loaded"] else "installed, not loaded"
@@ -303,7 +420,20 @@ def _run_service(args, cfg: ResolvedConfig) -> int:
     for key in ("url", "db", "python", "log", "plist"):
         if info.get(key):
             print(f"  {key + ':':8} {info[key]}")
+    _print_sync_status(service)
     return 0
+
+
+def _print_sync_status(service) -> None:
+    sync = service.sync_status()
+    if not sync["installed"]:
+        print("Goodreads auto-sync: off (run `adso service install-sync`).")
+        return
+    state = "" if sync["loaded"] else " (not loaded)"
+    print(f"Goodreads auto-sync: watching {sync['watch_dir']}{state}")
+    for key in ("reminder", "log"):
+        if sync.get(key):
+            print(f"  {key + ':':9} {sync[key]}")
 
 
 def _run_server(
@@ -409,11 +539,66 @@ def _build_parser() -> argparse.ArgumentParser:
         "action",
         nargs="?",
         default="status",
-        choices=["install", "uninstall", "restart", "status"],
-        help="What to do (default: status)",
+        choices=[
+            "install",
+            "uninstall",
+            "restart",
+            "status",
+            "install-sync",
+            "uninstall-sync",
+        ],
+        help="What to do (default: status). install-sync / uninstall-sync manage "
+        "Goodreads auto-sync: exports saved to Downloads are synced automatically.",
     )
     service_parser.add_argument(
         "--port", type=int, default=8420, help="Port for the always-on server (default: 8420)"
+    )
+    service_parser.add_argument(
+        "--watch-dir", help="Folder to watch for Goodreads exports (default: ~/Downloads)"
+    )
+    service_parser.add_argument(
+        "--day",
+        default="sun",
+        choices=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+        help="Day for the weekly export reminder (default: sun)",
+    )
+    service_parser.add_argument(
+        "--hour",
+        type=int,
+        default=9,
+        choices=range(0, 24),
+        metavar="0-23",
+        help="Hour for the weekly export reminder (default: 9)",
+    )
+    service_parser.add_argument(
+        "--no-reminder", action="store_true", help="Install auto-sync without the weekly reminder"
+    )
+
+    goodreads_parser = subparsers.add_parser(
+        "goodreads", help="Pick up Goodreads exports from your Downloads folder"
+    )
+    goodreads_sub = goodreads_parser.add_subparsers(dest="action", required=True)
+    goodreads_sub.add_parser("open", help="Open the Goodreads export page in your browser")
+    goodreads_sub.add_parser(
+        "remind", help="Show the 'time to export' prompt (used by the weekly reminder)"
+    )
+    ingest_parser = goodreads_sub.add_parser(
+        "ingest",
+        help="Back up, sync and file away any Goodreads export waiting in the watch folder",
+    )
+    ingest_parser.add_argument(
+        "--watch-dir", help="Folder to look in (default: ~/Downloads)"
+    )
+    ingest_parser.add_argument(
+        "--notify", action="store_true", help="Post a macOS notification with the result"
+    )
+    ingest_parser.add_argument(
+        "--no-covers", action="store_true", help="Skip the automatic cover-art fetch after sync"
+    )
+    ingest_parser.add_argument(
+        "--no-metadata",
+        action="store_true",
+        help="Skip the automatic Open Library metadata fetch after sync",
     )
 
     subparsers.add_parser(

@@ -96,8 +96,8 @@ def _port_in_use(port: int) -> bool:
         return sock.connect_ex(("127.0.0.1", port)) == 0
 
 
-def is_loaded() -> bool:
-    return _launchctl("print", f"{_domain()}/{LABEL}", check=False).returncode == 0
+def is_loaded(label: str = LABEL) -> bool:
+    return _launchctl("print", f"{_domain()}/{label}", check=False).returncode == 0
 
 
 def install(*, db_path: str | Path, port: int = DEFAULT_PORT, working_dir: str | Path) -> str:
@@ -185,3 +185,163 @@ def _arg_after(argv: list[str], flag: str) -> str | None:
         return argv[argv.index(flag) + 1]
     except (ValueError, IndexError):
         return None
+
+
+
+# --- Goodreads auto-sync ------------------------------------------------------
+# Two small LaunchAgents, neither kept alive:
+#   * the watcher runs `adso goodreads ingest` whenever the watch folder changes,
+#     so a freshly downloaded export is synced within seconds;
+#   * the reminder runs `adso goodreads remind` weekly to prompt the one manual
+#     step (clicking "Export Library" — Goodreads blocks headless browsers).
+
+WATCH_LABEL = f"{LABEL}.goodreads-watch"
+REMIND_LABEL = f"{LABEL}.goodreads-remind"
+WEEKDAYS = {"sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6}
+
+
+def agent_plist_path(label: str) -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
+
+
+def _adso_argv(python: str | None, db_path: str | Path, *command: str) -> list[str]:
+    return [
+        python or sys.executable,
+        "-m",
+        "adso.cli",
+        "--db",
+        str(Path(db_path).expanduser().resolve()),
+        *command,
+    ]
+
+
+def build_watch_plist(
+    *,
+    db_path: str | Path,
+    working_dir: str | Path,
+    watch_dir: str | Path,
+    python: str | None = None,
+    logs: Path | None = None,
+) -> dict:
+    """LaunchAgent that syncs a Goodreads export as soon as it lands in `watch_dir`."""
+    logs = logs or log_dir()
+    watch = str(Path(watch_dir).expanduser().resolve())
+    return {
+        "Label": WATCH_LABEL,
+        "ProgramArguments": _adso_argv(
+            python, db_path, "goodreads", "ingest", "--watch-dir", watch, "--notify"
+        ),
+        "WorkingDirectory": str(Path(working_dir).resolve()),
+        "WatchPaths": [watch],
+        "RunAtLoad": True,  # pick up anything downloaded while the agent was off
+        # Downloads changes constantly; don't re-run more than once a minute.
+        "ThrottleInterval": 60,
+        "ProcessType": "Background",
+        "StandardOutPath": str(logs / "goodreads-sync.log"),
+        "StandardErrorPath": str(logs / "goodreads-sync.log"),
+    }
+
+
+def build_remind_plist(
+    *,
+    db_path: str | Path,
+    working_dir: str | Path,
+    day: str = "sun",
+    hour: int = 9,
+    python: str | None = None,
+    logs: Path | None = None,
+) -> dict:
+    """LaunchAgent that prompts for a Goodreads export once a week."""
+    logs = logs or log_dir()
+    return {
+        "Label": REMIND_LABEL,
+        "ProgramArguments": _adso_argv(python, db_path, "goodreads", "remind"),
+        "WorkingDirectory": str(Path(working_dir).resolve()),
+        "StartCalendarInterval": {"Weekday": WEEKDAYS[day], "Hour": hour, "Minute": 0},
+        "RunAtLoad": False,
+        "ProcessType": "Interactive",
+        "StandardOutPath": str(logs / "goodreads-sync.log"),
+        "StandardErrorPath": str(logs / "goodreads-sync.log"),
+    }
+
+
+def _install_agent(label: str, spec: dict) -> None:
+    path = agent_plist_path(label)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if is_loaded(label):
+        _launchctl("bootout", f"{_domain()}/{label}", check=False)
+    with path.open("wb") as fh:
+        plistlib.dump(spec, fh)
+    _launchctl("bootstrap", _domain(), str(path))
+
+
+def _uninstall_agent(label: str) -> bool:
+    removed = False
+    if is_loaded(label):
+        _launchctl("bootout", f"{_domain()}/{label}", check=False)
+        removed = True
+    path = agent_plist_path(label)
+    if path.exists():
+        path.unlink()
+        removed = True
+    return removed
+
+
+def install_sync(
+    *,
+    db_path: str | Path,
+    working_dir: str | Path,
+    watch_dir: str | Path,
+    day: str = "sun",
+    hour: int = 9,
+    reminder: bool = True,
+) -> None:
+    """Install the Downloads watcher and (optionally) the weekly reminder."""
+    _require_macos()
+    log_dir().mkdir(parents=True, exist_ok=True)
+    _install_agent(
+        WATCH_LABEL, build_watch_plist(db_path=db_path, working_dir=working_dir, watch_dir=watch_dir)
+    )
+    if reminder:
+        _install_agent(
+            REMIND_LABEL,
+            build_remind_plist(db_path=db_path, working_dir=working_dir, day=day, hour=hour),
+        )
+    else:
+        _uninstall_agent(REMIND_LABEL)
+
+
+def uninstall_sync() -> bool:
+    """Remove the watcher and reminder. Returns True if anything was removed."""
+    _require_macos()
+    removed_watch = _uninstall_agent(WATCH_LABEL)
+    removed_remind = _uninstall_agent(REMIND_LABEL)
+    return removed_watch or removed_remind
+
+
+def sync_status() -> dict:
+    """Describe the Goodreads auto-sync agents, if installed."""
+    _require_macos()
+    watch_path = agent_plist_path(WATCH_LABEL)
+    remind_path = agent_plist_path(REMIND_LABEL)
+    info: dict = {
+        "installed": watch_path.exists(),
+        "loaded": is_loaded(WATCH_LABEL),
+        "reminder": None,
+    }
+    if watch_path.exists():
+        with watch_path.open("rb") as fh:
+            spec = plistlib.load(fh)
+        argv = spec.get("ProgramArguments", [])
+        info["watch_dir"] = _arg_after(argv, "--watch-dir")
+        info["db"] = _arg_after(argv, "--db")
+        info["log"] = spec.get("StandardOutPath")
+    if remind_path.exists():
+        with remind_path.open("rb") as fh:
+            when = plistlib.load(fh).get("StartCalendarInterval", {})
+        names = {v: k for k, v in WEEKDAYS.items()}
+        info["reminder"] = (
+            f"weekly, {names.get(when.get('Weekday'), '?').capitalize()} "
+            f"{when.get('Hour', 0):02d}:{when.get('Minute', 0):02d}"
+        )
+    return info

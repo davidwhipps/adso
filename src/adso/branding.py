@@ -41,6 +41,7 @@ COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         "Keep it fresh",
         [
             ("sync", "Re-import & reconcile from source"),
+            ("goodreads", "Auto-sync exports from your Downloads"),
             ("conflicts", "Review open sync conflicts"),
             ("resolve", "Decide a sync conflict"),
             ("fetch-covers", "Download missing cover art"),
