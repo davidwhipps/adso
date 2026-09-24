@@ -88,7 +88,7 @@ For a pinned, reproducible environment, run `pip install -r requirements-lock.tx
 - **Your local fields** (format, tags, loaned-to, notes) are protected during sync.
 - **Goodreads updates apply safely** only when your local value hasn't changed since the last sync — otherwise the change is held as a conflict rather than silently overwriting your data.
 - **Cosmetic drift is ignored** — community ratings, edition relabels, ISBNs, page counts, and title casing refresh quietly, while real title/author changes stay tracked. An empty Goodreads value never erases stored data.
-- **Open Library enrichment** — covers, plus descriptions, subjects, and place/time facets fetched politely (no API key); books the CSV left without ISBNs get them backfilled from the matched edition.
+- **Covers and Open Library enrichment**: covers matched to your exact Goodreads edition, plus descriptions, subjects, and place/time facets fetched politely (no API key); books the CSV left without ISBNs get them backfilled from the matched edition.
 
 ## Talk to your library with an AI agent (MCP)
 
@@ -139,7 +139,7 @@ adso export json --output exports/catalogue.json
 
 ## Book covers
 
-Adso can fetch cover art and store it locally beside your database in a `covers/` folder. Covers are enrichment only — never sourced from Goodreads, never part of conflict resolution.
+Adso can fetch cover art and store it locally beside your database in a `covers/` folder. Covers are enrichment only, never part of conflict resolution.
 
 ```bash
 pip install ".[covers]"
@@ -148,7 +148,7 @@ adso fetch-covers --limit 10 --dry-run   # preview without writing
 adso set-cover GOODREADS_ID --url https://example.com/cover.jpg
 ```
 
-Covers resolve from free public APIs (Open Library, then Apple Books) — no account or key needed — and are fetched automatically after import/sync (pass `--no-covers` to skip). A manual cover is never overwritten by an automatic fetch.
+Covers resolve from the book's own public Goodreads page first, so you get the same edition's cover Goodreads shows. If that has none, Adso falls back to Open Library and then Apple Books. No account or key is needed, and covers are fetched automatically after import/sync (pass `--no-covers` to skip). To swap covers you fetched earlier for the Goodreads versions, run `adso fetch-covers --refresh`. A manual cover is never overwritten by an automatic fetch.
 
 ## Optional & experimental
 

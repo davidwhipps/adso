@@ -7,13 +7,22 @@ Goodreads-sourced field, so it deliberately stays out of the
 source_snapshots/sync_conflicts machinery.
 
 Source chain (first hit wins):
-    1. Open Library cover by ISBN-13 then ISBN-10.
-    2. Open Library Search by title + author -> cover id -> cover by id.
-    3. iTunes / Apple Books Search by title + author -> artwork.
+    1. Goodreads book page for the book's own Goodreads ID -> og:image.
+    2. Goodreads autocomplete (ISBN, then title/author) -> exact Book ID match.
+    3. Open Library cover by ISBN-13 then ISBN-10.
+    4. Open Library Search by title + author -> cover id -> cover by id.
+    5. iTunes / Apple Books Search by title + author -> artwork.
 
-Open Library is the primary source: it is the open, community source (in keeping
-with the local-first ethos), needs no API key, and is lenient about volume.
-iTunes is a no-key fallback that fills gaps Open Library lacks art for. Google
+Goodreads comes first because every book is keyed by its Goodreads ID, so it is
+the only source guaranteed to return the same edition's cover you see there.
+The regular book page sits behind an AWS WAF JavaScript challenge, but the
+``.xml`` variant of the same URL serves the full HTML page; that is an
+undocumented quirk, so autocomplete (a public JSON endpoint) backs it up, and
+only a result whose ``bookId`` equals ours is accepted. Both are plain, polite
+GETs against public pages for books in your own library — no sign-in.
+
+Open Library is the open, community fallback, needs no API key, and is lenient
+about volume. iTunes is a no-key fallback that fills gaps Open Library lacks art for. Google
 Books is deliberately not used — its keyless tier rate-limits (HTTP 429) almost
 immediately and its throttled connections can stall.
 
@@ -23,6 +32,8 @@ automatic fetch.
 
 from __future__ import annotations
 
+import re
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any
@@ -47,6 +58,14 @@ OPENLIBRARY_COVER_ISBN = "https://covers.openlibrary.org/b/isbn/{isbn}-L.jpg?def
 OPENLIBRARY_COVER_ID = "https://covers.openlibrary.org/b/id/{cover_id}-L.jpg?default=false"
 OPENLIBRARY_SEARCH = "https://openlibrary.org/search.json"
 ITUNES_SEARCH = "https://itunes.apple.com/search"
+
+# Goodreads URLs and markup live here so drift is a one-line fix.
+GOODREADS_BOOK_PAGE = "https://www.goodreads.com/book/show/{goodreads_id}.xml"
+GOODREADS_AUTOCOMPLETE = "https://www.goodreads.com/book/auto_complete"
+_OG_IMAGE = re.compile(r'<meta[^>]+property="og:image"[^>]+content="([^"]+)"')
+# Autocomplete thumbnails carry a size suffix (``123._SY75_.jpg``); dropping it
+# yields the full-size image.
+_GOODREADS_SIZE_SUFFIX = re.compile(r"\._S[XY]\d+_(?=\.\w+$)")
 
 # Magic-byte signatures -> file extension. Only these are accepted as covers.
 _IMAGE_SIGNATURES = (
@@ -112,6 +131,71 @@ def _openlibrary_search_cover_id(title: str, author: str) -> int | None:
     return cover_id if isinstance(cover_id, int) and cover_id > 0 else None
 
 
+def _goodreads_usable(url: str | None) -> bool:
+    """False for missing URLs and Goodreads' "no photo" placeholder art."""
+    return bool(url) and "nophoto" not in url  # type: ignore[operator]
+
+
+def _goodreads_page_image_url(goodreads_id: str) -> str | None:
+    """The og:image on the book's own Goodreads page (exact edition)."""
+    response = _request("get", GOODREADS_BOOK_PAGE.format(goodreads_id=goodreads_id))
+    if response is None or response.status_code != 200:
+        return None  # 202 = WAF challenge; treat as a miss and fall through
+    match = _OG_IMAGE.search(response.text or "")
+    url = match.group(1) if match else None
+    return url if _goodreads_usable(url) else None
+
+
+def _bare_title(title: str) -> str:
+    """Drop series/subtitle noise: "Red Dragon (Hannibal, #1)" -> "Red Dragon"."""
+    return re.split(r"[(:]", title, maxsplit=1)[0].strip()
+
+
+def _goodreads_search_image_url(goodreads_id: str, book: dict[str, Any]) -> str | None:
+    """Search Goodreads autocomplete, accepting only an exact Book ID match."""
+    title = _bare_title(str(book.get("title") or ""))
+    author = " ".join(str(book.get("author") or "").split())
+    queries = [q for q in (book.get("isbn13"), book.get("isbn10")) if q]
+    if title:
+        queries += [f"{title} {author}".strip(), title]
+    for query in dict.fromkeys(queries):  # de-duplicate, keep order
+        response = _request(
+            "get", GOODREADS_AUTOCOMPLETE, params={"format": "json", "q": query}
+        )
+        if response is None or response.status_code != 200:
+            continue
+        try:
+            results = response.json()
+        except ValueError:
+            continue
+        for result in results if isinstance(results, list) else []:
+            if str(result.get("bookId")) != str(goodreads_id):
+                continue
+            url = result.get("imageUrl")
+            if _goodreads_usable(url):
+                return _GOODREADS_SIZE_SUFFIX.sub("", url)
+            return None  # our edition has no Goodreads art; searching on won't help
+    return None
+
+
+def _goodreads_cover(book: dict[str, Any]) -> tuple[bytes, str, str, str] | None:
+    """Resolve the cover Goodreads shows for this exact edition, if any."""
+    goodreads_id = str(book.get("goodreads_id") or "").strip()
+    if not goodreads_id:
+        return None
+    for source, find_url in (
+        ("goodreads:page", lambda: _goodreads_page_image_url(goodreads_id)),
+        ("goodreads:search", lambda: _goodreads_search_image_url(goodreads_id, book)),
+    ):
+        url = find_url()
+        if url:
+            result = _download_image(url)
+            if result is not None:
+                data, ext = result
+                return data, source, url, ext
+    return None
+
+
 def _itunes_artwork_url(title: str, author: str) -> str | None:
     """Look up cover artwork for a title (+author) via the iTunes Search API.
 
@@ -145,9 +229,14 @@ def resolve_cover(book: dict[str, Any]) -> tuple[bytes, str, str, str] | None:
     Returns ``(image_bytes, source, source_url, ext)`` for the first source that
     yields a valid image, or ``None`` if no source has one.
     """
+    # 1-2. Goodreads, for the exact edition.
+    resolved = _goodreads_cover(book)
+    if resolved is not None:
+        return resolved
+
     isbns = [isbn for isbn in (book.get("isbn13"), book.get("isbn10")) if isbn]
 
-    # 1. Open Library cover by ISBN.
+    # 3. Open Library cover by ISBN.
     for isbn in isbns:
         url = OPENLIBRARY_COVER_ISBN.format(isbn=isbn)
         result = _download_image(url)
@@ -155,7 +244,7 @@ def resolve_cover(book: dict[str, Any]) -> tuple[bytes, str, str, str] | None:
             data, ext = result
             return data, "openlibrary:isbn", url, ext
 
-    # 2. Open Library Search by title + author -> cover id -> cover image.
+    # 4. Open Library Search by title + author -> cover id -> cover image.
     title = (book.get("title") or "").strip()
     author = (book.get("author") or "").strip()
     if title:
@@ -167,7 +256,7 @@ def resolve_cover(book: dict[str, Any]) -> tuple[bytes, str, str, str] | None:
                 data, ext = result
                 return data, "openlibrary:search", url, ext
 
-    # 3. iTunes / Apple Books Search by title + author.
+    # 5. iTunes / Apple Books Search by title + author.
     if title:
         artwork_url = _itunes_artwork_url(title, author)
         if artwork_url:
@@ -191,6 +280,35 @@ def _remove_existing(data_dir: str | Path, cover_path: str | None) -> None:
         existing.unlink()
     except FileNotFoundError:
         pass
+
+
+# Another writer (e.g. the Downloads-watcher Goodreads sync) can hold the
+# catalogue's write lock for longer than db.connect's busy_timeout. A cover run
+# takes an hour or more on a large library, so it waits and retries instead of
+# crashing; if the lock persists across several books it stops cleanly.
+LOCK_RETRIES = 4
+LOCK_RETRY_DELAY = 5.0
+MAX_CONSECUTIVE_LOCKED = 3
+
+
+def _is_locked(exc: sqlite3.OperationalError) -> bool:
+    message = str(exc).lower()
+    return "locked" in message or "busy" in message
+
+
+def _record_cover(conn, book_id: int, **fields: Any) -> bool:
+    """``db.set_cover`` that rides out a busy catalogue. False if it stayed locked."""
+    for attempt in range(1, LOCK_RETRIES + 1):
+        try:
+            db.set_cover(conn, book_id, **fields)
+            return True
+        except sqlite3.OperationalError as exc:
+            if not _is_locked(exc):
+                raise
+            conn.rollback()
+            if attempt < LOCK_RETRIES:
+                time.sleep(LOCK_RETRY_DELAY)
+    return False
 
 
 def _should_skip(status: str | None, refresh: bool, retry_missing: bool) -> bool:
@@ -219,15 +337,34 @@ def fetch_covers(
     ``limit`` caps the number of books *attempted* (not merely scanned), which
     makes ``--limit 5`` useful for trial runs. ``retry_missing`` re-attempts
     books previously marked ``not_found`` (e.g. after adding a new source) while
-    leaving already-fetched and manual covers untouched. Returns summary stats.
+    leaving already-fetched and manual covers untouched. ``refresh`` only ever
+    upgrades: if a book that already has a cover misses or errors this time, its
+    existing cover is kept (counted as ``kept``). If the catalogue is locked by
+    another writer, the write is retried; a book whose write never gets through
+    is left exactly as it was (counted as ``locked``). Returns summary stats.
     """
     if limit is not None and limit < 1:
         raise CoversError("limit must be at least 1.")
 
     covers_dir = _covers_dir(data_dir)
-    fetched = not_found = errors = skipped = 0
+    fetched = not_found = errors = skipped = kept = locked = 0
+    consecutive_locked = 0
     actions: list[dict[str, str]] = []
     attempted = 0
+
+    def note_write(ok: bool, goodreads_id, title: str) -> None:
+        nonlocal locked, consecutive_locked
+        if ok:
+            consecutive_locked = 0
+            return
+        locked += 1
+        consecutive_locked += 1
+        actions.append({"goodreads_id": str(goodreads_id), "title": title, "result": "locked"})
+        if consecutive_locked >= MAX_CONSECUTIVE_LOCKED:
+            raise CoversError(
+                "The catalogue stayed locked by another process (is a sync running?). "
+                "Covers fetched so far are saved; run fetch-covers again to continue."
+            )
 
     for row in db.iter_books(conn):
         book = dict(row)
@@ -244,13 +381,21 @@ def fetch_covers(
         attempted += 1
 
         title = str(book.get("title") or "")
+        # Only reachable under refresh: a transient miss must not throw away a
+        # cover we already have.
+        has_cover = book.get("cover_status") == "fetched" and bool(book.get("cover_path"))
         try:
             resolved = resolve_cover(book)
         except CoversError:
+            if has_cover:
+                kept += 1
+                actions.append({"goodreads_id": str(goodreads_id), "title": title, "result": "kept"})
+                time.sleep(RATE_LIMIT_DELAY)
+                continue
             errors += 1
             actions.append({"goodreads_id": str(goodreads_id), "title": title, "result": "error"})
             if not dry_run:
-                db.set_cover(
+                ok = _record_cover(
                     conn,
                     int(book["id"]),
                     cover_path=book.get("cover_path"),
@@ -258,6 +403,13 @@ def fetch_covers(
                     cover_source_url=book.get("cover_source_url"),
                     cover_status="error",
                 )
+                note_write(ok, goodreads_id, title)
+            time.sleep(RATE_LIMIT_DELAY)
+            continue
+
+        if resolved is None and has_cover:
+            kept += 1
+            actions.append({"goodreads_id": str(goodreads_id), "title": title, "result": "kept"})
             time.sleep(RATE_LIMIT_DELAY)
             continue
 
@@ -265,7 +417,7 @@ def fetch_covers(
             not_found += 1
             actions.append({"goodreads_id": str(goodreads_id), "title": title, "result": "not_found"})
             if not dry_run:
-                db.set_cover(
+                ok = _record_cover(
                     conn,
                     int(book["id"]),
                     cover_path=None,
@@ -273,19 +425,19 @@ def fetch_covers(
                     cover_source_url=None,
                     cover_status="not_found",
                 )
+                note_write(ok, goodreads_id, title)
             time.sleep(RATE_LIMIT_DELAY)
             continue
 
         data, source, source_url, ext = resolved
         rel_path = f"covers/{goodreads_id}.{ext}"
-        actions.append(
-            {"goodreads_id": str(goodreads_id), "title": title, "result": "fetched", "source": source}
-        )
         if not dry_run:
-            _remove_existing(data_dir, book.get("cover_path"))
+            # Stage the image, record it, then swap it in: if the catalogue
+            # stays locked, the book's existing file and row are untouched.
             covers_dir.mkdir(parents=True, exist_ok=True)
-            (Path(data_dir) / rel_path).write_bytes(data)
-            db.set_cover(
+            staged = Path(data_dir) / f"{rel_path}.part"
+            staged.write_bytes(data)
+            ok = _record_cover(
                 conn,
                 int(book["id"]),
                 cover_path=rel_path,
@@ -293,6 +445,18 @@ def fetch_covers(
                 cover_source_url=source_url,
                 cover_status="fetched",
             )
+            if not ok:
+                staged.unlink()
+                note_write(ok, goodreads_id, title)
+                time.sleep(RATE_LIMIT_DELAY)
+                continue
+            note_write(ok, goodreads_id, title)
+            staged.replace(Path(data_dir) / rel_path)
+            if book.get("cover_path") != rel_path:
+                _remove_existing(data_dir, book.get("cover_path"))
+        actions.append(
+            {"goodreads_id": str(goodreads_id), "title": title, "result": "fetched", "source": source}
+        )
         fetched += 1
         time.sleep(RATE_LIMIT_DELAY)
 
@@ -301,6 +465,8 @@ def fetch_covers(
         "not_found": not_found,
         "errors": errors,
         "skipped": skipped,
+        "kept": kept,
+        "locked": locked,
         "actions": actions,
     }
 

@@ -7,7 +7,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from adso import db
-from adso.covers import ITUNES_SEARCH, OPENLIBRARY_SEARCH, fetch_covers, set_manual_cover
+from adso.covers import (
+    GOODREADS_AUTOCOMPLETE,
+    ITUNES_SEARCH,
+    OPENLIBRARY_SEARCH,
+    CoversError,
+    fetch_covers,
+    set_manual_cover,
+)
 
 JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"\x00" * 32
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
@@ -15,9 +22,12 @@ NOT_AN_IMAGE = b"<html>404 not found</html>"
 
 
 class FakeResp:
-    def __init__(self, *, status_code: int = 200, content: bytes = b"", json_data=None) -> None:
+    def __init__(
+        self, *, status_code: int = 200, content: bytes = b"", json_data=None, text: str = ""
+    ) -> None:
         self.status_code = status_code
         self.content = content
+        self.text = text
         self._json = json_data
         self.headers: dict[str, str] = {}
 
@@ -41,8 +51,13 @@ class CoversTests(unittest.TestCase):
         # No real network sleeps in tests.
         self._sleep_patch = patch("adso.covers.time.sleep", lambda *_a, **_k: None)
         self._sleep_patch.start()
+        # These tests exercise the Open Library / iTunes fallbacks; Goodreads is
+        # covered separately in GoodreadsCoversTests.
+        self._goodreads_patch = patch("adso.covers._goodreads_cover", return_value=None)
+        self._goodreads_patch.start()
 
     def tearDown(self) -> None:
+        self._goodreads_patch.stop()
         self._sleep_patch.stop()
         self.conn.close()
         self.tmp.cleanup()
@@ -283,6 +298,72 @@ class CoversTests(unittest.TestCase):
         # Bounded: 3 attempts per request, a finite number of requests per book.
         self.assertLess(fake.calls, 20)
 
+    def _ol_isbn_hit(self, method, url, **kwargs):
+        if url.startswith("https://covers.openlibrary.org"):
+            return FakeResp(content=JPEG_BYTES)
+        raise AssertionError(f"unexpected request to {url}")
+
+    def test_locked_catalogue_write_is_retried(self) -> None:
+        self._add_book("20", "Busy", isbn13="9780156001311")
+        real_set_cover = db.set_cover
+        attempts = []
+
+        def flaky_set_cover(*args, **kwargs):
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise sqlite3.OperationalError("database is locked")
+            return real_set_cover(*args, **kwargs)
+
+        with patch("adso.covers._request", side_effect=self._ol_isbn_hit), patch(
+            "adso.covers.db.set_cover", side_effect=flaky_set_cover
+        ):
+            result = fetch_covers(self.conn, self.root)
+
+        self.assertEqual((result["fetched"], result["locked"]), (1, 0))
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(self._book("20")["cover_status"], "fetched")
+        self.assertEqual(sorted(p.name for p in (self.root / "covers").iterdir()), ["20.jpg"])
+
+    def test_persistently_locked_book_is_left_untouched(self) -> None:
+        self._add_book("21", "Held", isbn13="9780156001311")
+        (self.root / "covers").mkdir()
+        (self.root / "covers" / "21.png").write_bytes(PNG_BYTES)
+        db.set_cover(
+            self.conn,
+            int(self._book("21")["id"]),
+            cover_path="covers/21.png",
+            cover_source="itunes:search",
+            cover_source_url="https://example.com/old.png",
+            cover_status="fetched",
+        )
+
+        with patch("adso.covers._request", side_effect=self._ol_isbn_hit), patch(
+            "adso.covers.db.set_cover", side_effect=sqlite3.OperationalError("database is locked")
+        ):
+            result = fetch_covers(self.conn, self.root, refresh=True)
+
+        self.assertEqual((result["fetched"], result["locked"]), (0, 1))
+        book = self._book("21")
+        self.assertEqual(book["cover_source"], "itunes:search")
+        # The old file survives and no staged or new file is left behind.
+        self.assertEqual(sorted(p.name for p in (self.root / "covers").iterdir()), ["21.png"])
+
+    def test_run_stops_cleanly_when_catalogue_stays_locked(self) -> None:
+        for n in range(5):
+            self._add_book(str(30 + n), f"Book {n}", isbn13="9780156001311")
+
+        with patch("adso.covers._request", side_effect=self._ol_isbn_hit), patch(
+            "adso.covers.db.set_cover", side_effect=sqlite3.OperationalError("database is locked")
+        ), self.assertRaisesRegex(CoversError, "stayed locked"):
+            fetch_covers(self.conn, self.root)
+
+    def test_other_database_errors_are_not_swallowed(self) -> None:
+        self._add_book("22", "Broken", isbn13="9780156001311")
+        with patch("adso.covers._request", side_effect=self._ol_isbn_hit), patch(
+            "adso.covers.db.set_cover", side_effect=sqlite3.OperationalError("no such column: x")
+        ), self.assertRaisesRegex(sqlite3.OperationalError, "no such column"):
+            fetch_covers(self.conn, self.root)
+
     def test_migration_adds_cover_columns(self) -> None:
         # Build a pre-cover books table, then prove initialize() backfills columns.
         legacy = sqlite3.connect(self.root / "legacy.sqlite")
@@ -314,3 +395,155 @@ class CoversTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def goodreads_page(image_url: str) -> str:
+    return f'<html><head><meta property="og:image" content="{image_url}"></head></html>'
+
+
+GR_IMAGE = "https://m.media-amazon.com/images/S/compressed.photo.goodreads.com/books/1i/42.jpg"
+GR_THUMB = "https://i.gr-assets.com/images/S/compressed.photo.goodreads.com/books/1i/42._SY75_.jpg"
+GR_FULL = "https://i.gr-assets.com/images/S/compressed.photo.goodreads.com/books/1i/42.jpg"
+GR_PAGE = "https://www.goodreads.com/book/show/42.xml"
+
+
+class GoodreadsCoversTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.conn = sqlite3.connect(self.root / "adso.sqlite")
+        self.conn.row_factory = sqlite3.Row
+        db.initialize(self.conn)
+        self._sleep_patch = patch("adso.covers.time.sleep", lambda *_a, **_k: None)
+        self._sleep_patch.start()
+        self.conn.execute(
+            "INSERT INTO books (goodreads_id, title, author, isbn13) VALUES (?, ?, ?, ?)",
+            ("42", "Red Dragon (Hannibal Lecter, #1)", "Thomas  Harris", "9780399124426"),
+        )
+        self.conn.commit()
+
+    def tearDown(self) -> None:
+        self._sleep_patch.stop()
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def _run(self, fake_request):
+        with patch("adso.covers._request", side_effect=fake_request):
+            fetch_covers(self.conn, self.root)
+        return db.get_book_by_goodreads_id(self.conn, "42")
+
+    def test_book_page_og_image_wins(self) -> None:
+        def fake_request(method, url, **kwargs):
+            if url == GR_PAGE:
+                return FakeResp(text=goodreads_page(GR_IMAGE))
+            if url == GR_IMAGE:
+                return FakeResp(content=JPEG_BYTES)
+            raise AssertionError(f"unexpected request to {url}")
+
+        book = self._run(fake_request)
+        self.assertEqual(book["cover_source"], "goodreads:page")
+        self.assertEqual(book["cover_source_url"], GR_IMAGE)
+        self.assertTrue((self.root / "covers" / "42.jpg").is_file())
+
+    def test_waf_challenge_falls_through_to_exact_id_autocomplete(self) -> None:
+        queries = []
+
+        def fake_request(method, url, **kwargs):
+            if url == GR_PAGE:
+                return FakeResp(status_code=202)  # AWS WAF challenge
+            if url == GOODREADS_AUTOCOMPLETE:
+                queries.append(kwargs["params"]["q"])
+                return FakeResp(json_data=[
+                    {"bookId": "999", "imageUrl": "https://example.com/wrong-edition.jpg"},
+                    {"bookId": "42", "imageUrl": GR_THUMB},
+                ])
+            if url == GR_FULL:
+                return FakeResp(content=PNG_BYTES)
+            raise AssertionError(f"unexpected request to {url}")
+
+        book = self._run(fake_request)
+        self.assertEqual(book["cover_source"], "goodreads:search")
+        self.assertEqual(book["cover_source_url"], GR_FULL)  # size suffix stripped
+        self.assertEqual(queries, ["9780399124426"])
+
+    def test_autocomplete_tries_bare_title_queries(self) -> None:
+        queries = []
+
+        def fake_request(method, url, **kwargs):
+            if url == GR_PAGE:
+                return FakeResp(status_code=202)
+            if url == GOODREADS_AUTOCOMPLETE:
+                queries.append(kwargs["params"]["q"])
+                hit = kwargs["params"]["q"] == "Red Dragon"
+                return FakeResp(json_data=[{"bookId": "42", "imageUrl": GR_THUMB}] if hit else [])
+            if url == GR_FULL:
+                return FakeResp(content=JPEG_BYTES)
+            raise AssertionError(f"unexpected request to {url}")
+
+        book = self._run(fake_request)
+        self.assertEqual(book["cover_source"], "goodreads:search")
+        self.assertEqual(queries, ["9780399124426", "Red Dragon Thomas Harris", "Red Dragon"])
+
+    def test_placeholder_and_misses_fall_back_to_open_library(self) -> None:
+        def fake_request(method, url, **kwargs):
+            if url == GR_PAGE:
+                return FakeResp(text=goodreads_page("https://s.gr-assets.com/assets/nophoto/book/111x148.png"))
+            if url == GOODREADS_AUTOCOMPLETE:
+                return FakeResp(json_data=[{"bookId": "999", "imageUrl": GR_THUMB}])
+            if url.startswith("https://covers.openlibrary.org/b/isbn/"):
+                return FakeResp(content=JPEG_BYTES)
+            raise AssertionError(f"unexpected request to {url}")
+
+        book = self._run(fake_request)
+        self.assertEqual(book["cover_source"], "openlibrary:isbn")
+
+    def test_manual_cover_is_still_never_overwritten(self) -> None:
+        self.conn.execute("UPDATE books SET cover_status = 'manual' WHERE goodreads_id = '42'")
+        self.conn.commit()
+        with patch("adso.covers._request", side_effect=AssertionError("should not fetch")):
+            result = fetch_covers(self.conn, self.root, refresh=True)
+        self.assertEqual(result["fetched"], 0)
+
+    def test_transient_503_is_retried(self) -> None:
+        calls = []
+
+        class FakeRequests:
+            def request(self, method, url, **kwargs):
+                calls.append(url)
+                if url == GR_PAGE and len(calls) == 1:
+                    return FakeResp(status_code=503)
+                if url == GR_PAGE:
+                    return FakeResp(text=goodreads_page(GR_IMAGE))
+                return FakeResp(content=JPEG_BYTES)
+
+        with patch("adso.ol_http.require_requests", return_value=FakeRequests()), patch(
+            "adso.ol_http.time.sleep", lambda *_a, **_k: None
+        ):
+            fetch_covers(self.conn, self.root)
+
+        self.assertEqual(calls[:2], [GR_PAGE, GR_PAGE])
+        self.assertEqual(db.get_book_by_goodreads_id(self.conn, "42")["cover_source"], "goodreads:page")
+
+    def test_refresh_miss_keeps_existing_cover(self) -> None:
+        (self.root / "covers").mkdir()
+        (self.root / "covers" / "42.jpg").write_bytes(JPEG_BYTES)
+        db.set_cover(
+            self.conn,
+            1,
+            cover_path="covers/42.jpg",
+            cover_source="openlibrary:isbn",
+            cover_source_url="https://covers.openlibrary.org/x.jpg",
+            cover_status="fetched",
+        )
+
+        def all_miss(method, url, **kwargs):
+            return FakeResp(status_code=404)
+
+        with patch("adso.covers._request", side_effect=all_miss):
+            result = fetch_covers(self.conn, self.root, refresh=True)
+
+        self.assertEqual((result["kept"], result["not_found"]), (1, 0))
+        book = db.get_book_by_goodreads_id(self.conn, "42")
+        self.assertEqual(book["cover_status"], "fetched")
+        self.assertEqual(book["cover_source"], "openlibrary:isbn")
+        self.assertTrue((self.root / "covers" / "42.jpg").is_file())
