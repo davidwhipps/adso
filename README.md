@@ -155,6 +155,7 @@ Covers resolve from free public APIs (Open Library, then Apple Books) — no acc
 These work but sit outside the core v1 surface:
 
 - **Local web UI** — `pip install ".[web]"`, then `adso serve` opens a browser view over the same catalogue (visual conflict resolution, import, activity, reports, local-field editing, and CSV/JSON/Notion export). Early preview; a proper write-up comes with v2.
+- **Always-on web UI (macOS)** — `adso service install` registers a LaunchAgent that keeps the web UI running at `http://127.0.0.1:8420`, starting at login and restarting if it stops. Open it in Safari and choose **File → Add to Dock** to get a standalone Adso app with its own icon and window. Also `adso service status | restart | uninstall`; use `restart` after upgrading Adso. The service runs the same Python that installed it, so install from a pinned copy (e.g. `uv tool install ".[web]"`) if you don't want your everyday app tied to a development checkout.
 - **Configuration profiles** — `adso config init` lets you bundle a database path and connector settings under named profiles and switch with `--profile`. Handy if you keep more than one library.
 - **Notion export** — `pip install ".[notion]"` adds `adso export notion`, an optional adapter that mirrors the catalogue into a Notion database. Experimental; the local SQLite catalogue always stays canonical.
 
