@@ -436,3 +436,47 @@ class GoodreadsCoversTests(unittest.TestCase):
         with patch("adso.covers._request", side_effect=AssertionError("should not fetch")):
             result = fetch_covers(self.conn, self.root, refresh=True)
         self.assertEqual(result["fetched"], 0)
+
+    def test_transient_503_is_retried(self) -> None:
+        calls = []
+
+        class FakeRequests:
+            def request(self, method, url, **kwargs):
+                calls.append(url)
+                if url == GR_PAGE and len(calls) == 1:
+                    return FakeResp(status_code=503)
+                if url == GR_PAGE:
+                    return FakeResp(text=goodreads_page(GR_IMAGE))
+                return FakeResp(content=JPEG_BYTES)
+
+        with patch("adso.ol_http.require_requests", return_value=FakeRequests()), patch(
+            "adso.ol_http.time.sleep", lambda *_a, **_k: None
+        ):
+            fetch_covers(self.conn, self.root)
+
+        self.assertEqual(calls[:2], [GR_PAGE, GR_PAGE])
+        self.assertEqual(db.get_book_by_goodreads_id(self.conn, "42")["cover_source"], "goodreads:page")
+
+    def test_refresh_miss_keeps_existing_cover(self) -> None:
+        (self.root / "covers").mkdir()
+        (self.root / "covers" / "42.jpg").write_bytes(JPEG_BYTES)
+        db.set_cover(
+            self.conn,
+            1,
+            cover_path="covers/42.jpg",
+            cover_source="openlibrary:isbn",
+            cover_source_url="https://covers.openlibrary.org/x.jpg",
+            cover_status="fetched",
+        )
+
+        def all_miss(method, url, **kwargs):
+            return FakeResp(status_code=404)
+
+        with patch("adso.covers._request", side_effect=all_miss):
+            result = fetch_covers(self.conn, self.root, refresh=True)
+
+        self.assertEqual((result["kept"], result["not_found"]), (1, 0))
+        book = db.get_book_by_goodreads_id(self.conn, "42")
+        self.assertEqual(book["cover_status"], "fetched")
+        self.assertEqual(book["cover_source"], "openlibrary:isbn")
+        self.assertTrue((self.root / "covers" / "42.jpg").is_file())

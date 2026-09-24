@@ -307,13 +307,15 @@ def fetch_covers(
     ``limit`` caps the number of books *attempted* (not merely scanned), which
     makes ``--limit 5`` useful for trial runs. ``retry_missing`` re-attempts
     books previously marked ``not_found`` (e.g. after adding a new source) while
-    leaving already-fetched and manual covers untouched. Returns summary stats.
+    leaving already-fetched and manual covers untouched. ``refresh`` only ever
+    upgrades: if a book that already has a cover misses or errors this time, its
+    existing cover is kept (counted as ``kept``). Returns summary stats.
     """
     if limit is not None and limit < 1:
         raise CoversError("limit must be at least 1.")
 
     covers_dir = _covers_dir(data_dir)
-    fetched = not_found = errors = skipped = 0
+    fetched = not_found = errors = skipped = kept = 0
     actions: list[dict[str, str]] = []
     attempted = 0
 
@@ -332,9 +334,17 @@ def fetch_covers(
         attempted += 1
 
         title = str(book.get("title") or "")
+        # Only reachable under refresh: a transient miss must not throw away a
+        # cover we already have.
+        has_cover = book.get("cover_status") == "fetched" and bool(book.get("cover_path"))
         try:
             resolved = resolve_cover(book)
         except CoversError:
+            if has_cover:
+                kept += 1
+                actions.append({"goodreads_id": str(goodreads_id), "title": title, "result": "kept"})
+                time.sleep(RATE_LIMIT_DELAY)
+                continue
             errors += 1
             actions.append({"goodreads_id": str(goodreads_id), "title": title, "result": "error"})
             if not dry_run:
@@ -346,6 +356,12 @@ def fetch_covers(
                     cover_source_url=book.get("cover_source_url"),
                     cover_status="error",
                 )
+            time.sleep(RATE_LIMIT_DELAY)
+            continue
+
+        if resolved is None and has_cover:
+            kept += 1
+            actions.append({"goodreads_id": str(goodreads_id), "title": title, "result": "kept"})
             time.sleep(RATE_LIMIT_DELAY)
             continue
 
@@ -389,6 +405,7 @@ def fetch_covers(
         "not_found": not_found,
         "errors": errors,
         "skipped": skipped,
+        "kept": kept,
         "actions": actions,
     }
 

@@ -982,6 +982,7 @@ def _format_cover_result(result: dict[str, object], *, dry_run: bool) -> str:
         f"{heading}: "
         f"{result['fetched']} fetched, {result['not_found']} not found, "
         f"{result['errors']} errors, {result['skipped']} skipped"
+        + (f", {result['kept']} kept existing cover" if result.get("kept") else "")
     ]
     if dry_run:
         actions = result.get("actions", [])
@@ -996,6 +997,8 @@ def _format_cover_result(result: dict[str, object], *, dry_run: bool) -> str:
                     detail = f"would fetch from {action.get('source')}"
                 elif outcome == "not_found":
                     detail = "no cover found"
+                elif outcome == "kept":
+                    detail = "no new cover found; would keep the existing one"
                 else:
                     detail = "error"
                 lines.append(f"- {title} (Goodreads ID {action.get('goodreads_id')}): {detail}")

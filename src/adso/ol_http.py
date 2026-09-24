@@ -34,23 +34,41 @@ def require_requests(error_cls: type[Exception] = EnrichmentHTTPError):
     return requests
 
 
-def request(method: str, url: str, *, error_cls: type[Exception] = EnrichmentHTTPError, **kwargs):
-    """HTTP wrapper with bounded timeouts and bounded 429 backoff.
+# Throttling (429) and transient server errors worth another try. Goodreads in
+# particular answers a steady fraction of book-page requests with a 503 that
+# succeeds on the next attempt.
+RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+MAX_ATTEMPTS = 3
 
-    Both the connect/read timeout and the 429 retry count are capped so that a
-    slow or throttling host can never stall a sequential fetch. Network errors
-    are raised as ``error_cls`` so each fetcher surfaces its own error type.
+
+def request(method: str, url: str, *, error_cls: type[Exception] = EnrichmentHTTPError, **kwargs):
+    """HTTP wrapper with bounded timeouts and bounded retry/backoff.
+
+    Both the connect/read timeout and the retry count (for 429 and transient
+    5xx responses) are capped so that a slow, throttling or flaky host can never
+    stall a sequential fetch. Network errors are raised as ``error_cls`` so each
+    fetcher surfaces its own error type.
     """
     requests = require_requests(error_cls)
     headers = {"User-Agent": USER_AGENT, **kwargs.pop("headers", {})}
     kwargs.setdefault("timeout", HTTP_TIMEOUT)
     response = None
-    for _ in range(3):
+    for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             response = requests.request(method, url, headers=headers, **kwargs)
         except Exception as exc:  # noqa: BLE001 - network errors become a miss/error upstream
             raise error_cls(f"Could not reach {url}: {str(exc)[:300]}") from exc
-        if response.status_code != 429:
+        if response.status_code not in RETRYABLE_STATUSES:
             return response
-        time.sleep(min(int(response.headers.get("Retry-After", 2) or 2), 5))
-    return response  # still 429 after retries -> treated as a miss upstream
+        if attempt < MAX_ATTEMPTS:
+            time.sleep(_retry_delay(response, attempt))
+    return response  # still failing after retries -> treated as a miss upstream
+
+
+def _retry_delay(response, attempt: int) -> float:
+    """Honour a numeric Retry-After, else back off 1s, 2s, ...; never over 5s."""
+    try:
+        delay = float(response.headers.get("Retry-After") or attempt)
+    except (TypeError, ValueError):  # e.g. an HTTP-date Retry-After
+        delay = attempt
+    return min(max(delay, 0), 5)
