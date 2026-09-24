@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Always-on web UI on macOS** (`adso service install|status|restart|uninstall`):
+  a per-user LaunchAgent keeps `adso serve` running at `http://127.0.0.1:8420`
+  (starts at login, restarts on crash). The web UI now ships a favicon, an
+  apple-touch-icon and a web app manifest, so Safari's **File → Add to Dock** turns
+  it into a standalone Adso app.
 - **MCP server** (`adso mcp`): serve the catalogue to LLM agents (Claude Desktop,
   Claude Code) over stdio. Eight tools — `search_books`, `get_book`,
   `library_stats`, `list_facets`, plus curated writes `add_tags`, `remove_tags`,

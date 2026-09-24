@@ -102,6 +102,9 @@ def _dispatch(args, parser) -> int:
     if args.command == "mcp":
         return _run_mcp(cfg.db_path)
 
+    if args.command == "service":
+        return _run_service(args, cfg)
+
     conn = db.connect(cfg.db_path)
     try:
         if args.command == "init":
@@ -269,6 +272,40 @@ def _dispatch(args, parser) -> int:
         conn.close()
 
 
+def _run_service(args, cfg: ResolvedConfig) -> int:
+    from . import service
+
+    if args.action == "install":
+        url = service.install(db_path=cfg.db_path, port=args.port, working_dir=Path.cwd())
+        print(f"Adso is now always running at {url} (starts at login, restarts if it stops).")
+        print(f"Catalogue: {Path(cfg.db_path).resolve()}")
+        print("Tip: open it in Safari, then File > Add to Dock for a standalone Adso app.")
+        return 0
+    if args.action == "uninstall":
+        if service.uninstall():
+            print("Adso service stopped and removed.")
+        else:
+            print("Adso service was not installed.")
+        return 0
+    if args.action == "restart":
+        service.restart()
+        print("Adso service restarted.")
+        return 0
+
+    info = service.status()
+    if not info["installed"]:
+        print("Adso service: not installed (run `adso service install`).")
+        return 0
+    state = f"running (pid {info['pid']})" if info.get("pid") else (
+        "loaded, not running" if info["loaded"] else "installed, not loaded"
+    )
+    print(f"Adso service: {state}")
+    for key in ("url", "db", "python", "log", "plist"):
+        if info.get(key):
+            print(f"  {key + ':':8} {info[key]}")
+    return 0
+
+
 def _run_server(
     db_path: str,
     *,
@@ -364,6 +401,20 @@ def _build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--host", default="127.0.0.1", help="Host to bind (default: 127.0.0.1)")
     serve_parser.add_argument("--port", type=int, default=8000, help="Port to bind (default: 8000)")
     serve_parser.add_argument("--no-browser", action="store_true", help="Do not open a browser window")
+
+    service_parser = subparsers.add_parser(
+        "service", help="Keep the web UI always running in the background (macOS)"
+    )
+    service_parser.add_argument(
+        "action",
+        nargs="?",
+        default="status",
+        choices=["install", "uninstall", "restart", "status"],
+        help="What to do (default: status)",
+    )
+    service_parser.add_argument(
+        "--port", type=int, default=8420, help="Port for the always-on server (default: 8420)"
+    )
 
     subparsers.add_parser(
         "mcp",

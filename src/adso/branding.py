@@ -56,6 +56,7 @@ COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
             ("report", "Conflict / sync reports"),
             ("config", "Profiles & settings"),
             ("serve", "Open the web UI"),
+            ("service", "Keep the web UI always running (macOS)"),
             ("mcp", "Serve the catalogue to LLM agents (MCP)"),
         ],
     ),
