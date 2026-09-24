@@ -582,11 +582,16 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
     def cover(
         goodreads_id: str,
         conn: sqlite3.Connection = Depends(get_conn),
+        size: str | None = Query(None, description="'thumb' for a small cached copy"),
     ) -> Response:
         row = db.get_book_by_goodreads_id(conn, goodreads_id)
         if row is not None and row["cover_path"]:
             file_path = cover_root / row["cover_path"]
             if file_path.is_file():
+                if size == "thumb":
+                    # Dense views (wall, table, strips) load hundreds of covers
+                    # at once; serve a cached small copy when one can be made.
+                    file_path = covers_service.cover_thumbnail(file_path) or file_path
                 return FileResponse(
                     file_path,
                     headers={"Cache-Control": "public, max-age=86400"},

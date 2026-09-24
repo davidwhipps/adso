@@ -7,7 +7,7 @@
 <div class="bookpage" data-book="{{ gid }}">
   <div class="split">
     <section class="stage" aria-label="Cover">
-      <div class="blur" style="background-image: url('/covers/{{ gid }}')"></div>
+      <div class="blur" style="background-image: url('/covers/{{ gid }}?size=thumb')"></div>
       <a class="circle back" href="/?book={{ gid }}" data-back aria-label="Back to the library">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3 5 8l5 5"/></svg>
       </a>
@@ -79,7 +79,7 @@
     <div class="strip">
       {% for b in items %}
       <a class="s-it" href="/book/{{ b.goodreads_id }}" style="--d: {{ loop.index0 * 30 }}ms">
-        <div class="cv"><div class="fb"><span>{{ b.title }}</span></div><img src="{{ b.cover_url }}" alt="" loading="lazy" decoding="async"></div>
+        <div class="cv"><div class="fb"><span>{{ b.title }}</span></div><img src="{{ b.cover_url }}?size=thumb" alt="" loading="lazy" decoding="async"></div>
         <div class="t">{{ b.title }}</div>
       </a>
       {% endfor %}

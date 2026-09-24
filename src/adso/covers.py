@@ -32,8 +32,12 @@ automatic fetch.
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
 import sqlite3
+import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -155,6 +159,73 @@ def image_size(path: str | Path) -> tuple[int, int] | None:
                 fh.seek(length - 2, 1)
     except OSError:
         return None
+
+
+# Thumbnails: small JPEG copies of covers for dense views (the web UI's wall
+# and table), cached beside the covers and rebuilt when the cover changes.
+THUMB_DIR = ".thumbs"
+THUMB_MAX_PX = 360  # longest edge; sharp at 2x for a ~120px-wide cover
+
+
+def _pillow_thumbnail(src: Path, dest: Path, max_px: int) -> bool:
+    try:
+        from PIL import Image  # optional; not a dependency
+    except ImportError:
+        return False
+    with Image.open(src) as img:
+        img.thumbnail((max_px, max_px))
+        img.convert("RGB").save(dest, "JPEG", quality=82, optimize=True)
+    return True
+
+
+def _sips_thumbnail(src: Path, dest: Path, max_px: int) -> bool:
+    sips = shutil.which("sips")  # built into macOS
+    if not sips:
+        return False
+    result = subprocess.run(
+        [sips, "-Z", str(max_px), "-s", "format", "jpeg", "-s", "formatOptions", "82", str(src), "--out", str(dest)],
+        capture_output=True,
+        timeout=30,
+    )
+    return result.returncode == 0 and dest.is_file() and dest.stat().st_size > 0
+
+
+def cover_thumbnail(src: str | Path, *, max_px: int = THUMB_MAX_PX) -> Path | None:
+    """Return a cached thumbnail for the cover at ``src``, making it if needed.
+
+    Thumbnails live in ``<covers dir>/.thumbs/<max_px>/`` and are rebuilt when
+    the cover is newer than its thumbnail. They are made with Pillow if it
+    happens to be installed, else macOS ``sips``; with neither (or on any
+    failure) this returns None and callers serve the original cover.
+    """
+    src = Path(src)
+    try:
+        src_mtime = src.stat().st_mtime
+    except OSError:
+        return None
+    dest = src.parent / THUMB_DIR / str(max_px) / f"{src.stem}-{src.suffix.lstrip('.')}.jpg"
+    try:
+        if dest.stat().st_mtime >= src_mtime:
+            return dest
+    except OSError:
+        pass
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        # Write to a temp file and rename, so a concurrent request never
+        # serves a half-written thumbnail.
+        fd, tmp_name = tempfile.mkstemp(suffix=".jpg", dir=dest.parent)
+        os.close(fd)
+        tmp = Path(tmp_name)
+        try:
+            made = _pillow_thumbnail(src, tmp, max_px) or _sips_thumbnail(src, tmp, max_px)
+            if not made:
+                return None
+            os.replace(tmp, dest)
+        finally:
+            tmp.unlink(missing_ok=True)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    return dest
 
 
 def _download_image(url: str) -> tuple[bytes, str] | None:

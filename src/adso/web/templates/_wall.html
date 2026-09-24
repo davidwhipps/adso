@@ -9,7 +9,7 @@
      {% if gid %}href="/book/{{ gid }}" data-id="{{ gid }}"{% endif %} data-i="{{ loop.index0 }}"
      data-title="{{ book.title }}" data-author="{{ book.author or '' }}" data-rating="{{ book.rating or 0 }}"
      style="--d: {{ [loop.index0 * 1.2, 500] | min | int }}ms" aria-label="{{ book.title }}">
-    {% if book.cover_url %}<img src="{{ book.cover_url }}" alt="" loading="lazy" decoding="async">{% endif %}
+    {% if book.cover_url %}<img src="{{ book.cover_url }}?size=thumb" alt="" loading="lazy" decoding="async">{% endif %}
   </a>
   {% endfor %}
 </div>
