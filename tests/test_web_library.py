@@ -212,3 +212,99 @@ class ImageSizeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CoverThumbnailTests(unittest.TestCase):
+    """covers.cover_thumbnail with the image backends stubbed (CI has neither)."""
+
+    def setUp(self) -> None:
+        import os
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.src = Path(self.tmp.name) / "42.png"
+        self.src.write_bytes(b"full-size cover")
+        os.utime(self.src, (1_000, 1_000))
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _fake(self, calls: list):
+        def make(src, dest, max_px):
+            calls.append(src)
+            Path(dest).write_bytes(b"thumb")
+            return True
+        return make
+
+    def test_no_backend_returns_none_and_leaves_no_temp_files(self) -> None:
+        from unittest.mock import patch
+
+        from adso import covers
+
+        with patch.object(covers, "_pillow_thumbnail", return_value=False), \
+             patch.object(covers, "_sips_thumbnail", return_value=False):
+            self.assertIsNone(covers.cover_thumbnail(self.src))
+        self.assertEqual(list((Path(self.tmp.name) / ".thumbs" / "360").iterdir()), [])
+
+    def test_makes_once_then_serves_cache_and_rebuilds_when_cover_changes(self) -> None:
+        import os
+        from unittest.mock import patch
+
+        from adso import covers
+
+        calls: list = []
+        with patch.object(covers, "_pillow_thumbnail", return_value=False), \
+             patch.object(covers, "_sips_thumbnail", side_effect=self._fake(calls)):
+            first = covers.cover_thumbnail(self.src)
+            self.assertEqual(first, Path(self.tmp.name) / ".thumbs" / "360" / "42-png.jpg")
+            self.assertEqual(first.read_bytes(), b"thumb")
+            covers.cover_thumbnail(self.src)
+            self.assertEqual(len(calls), 1)  # second call hit the cache
+            os.utime(self.src, None)  # the cover was replaced: newer than its thumb
+            os.utime(first, (2_000, 2_000))
+            covers.cover_thumbnail(self.src)
+            self.assertEqual(len(calls), 2)
+
+    def test_missing_cover_returns_none(self) -> None:
+        from adso.covers import cover_thumbnail
+
+        self.assertIsNone(cover_thumbnail(Path(self.tmp.name) / "nope.jpg"))
+
+
+@unittest.skipUnless(_HAS_TESTCLIENT, "fastapi TestClient (httpx) not installed")
+class CoverThumbRouteTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from adso.web.app import create_app
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self.tmp.name) / "adso.sqlite")
+        _seed(self.db_path)
+        (Path(self.tmp.name) / "covers").mkdir()
+        (Path(self.tmp.name) / "covers" / "1.jpg").write_bytes(b"\xff\xd8full")
+        conn = db.connect(self.db_path)
+        conn.execute("UPDATE books SET cover_path = 'covers/1.jpg' WHERE goodreads_id = '1'")
+        conn.commit()
+        conn.close()
+        self.client = TestClient(create_app(self.db_path))
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_thumb_served_when_available(self) -> None:
+        from unittest.mock import patch
+
+        thumb = Path(self.tmp.name) / "small.jpg"
+        thumb.write_bytes(b"\xff\xd8small")
+        with patch("adso.covers.cover_thumbnail", return_value=thumb):
+            self.assertEqual(self.client.get("/covers/1?size=thumb").content, b"\xff\xd8small")
+
+    def test_thumb_falls_back_to_full_cover(self) -> None:
+        from unittest.mock import patch
+
+        with patch("adso.covers.cover_thumbnail", return_value=None):
+            self.assertEqual(self.client.get("/covers/1?size=thumb").content, b"\xff\xd8full")
+        self.assertEqual(self.client.get("/covers/1").content, b"\xff\xd8full")
+
+    def test_wall_and_table_request_thumbnails(self) -> None:
+        self.assertIn('src="/covers/1?size=thumb"', self.client.get("/", params={"view": "wall"}).text)
+        self.assertIn('src="/covers/1?size=thumb"', self.client.get("/", params={"view": "table"}).text)
+        self.assertIn('src="/covers/1"', self.client.get("/").text)  # the grid keeps full covers

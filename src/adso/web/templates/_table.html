@@ -22,7 +22,7 @@
       {% set gid = book.goodreads_id %}
       <tr {% if gid %}data-id="{{ gid }}"{% endif %} data-i="{{ loop.index0 }}" class="{{ 'open' if open_book and open_book.goodreads_id == gid }}">
         <td>{% if gid %}<input type="checkbox" class="cb" data-cb aria-label="Select {{ book.title }}">{% endif %}</td>
-        <td class="th"><div class="tn">{% if book.cover_url %}<img src="{{ book.cover_url }}" alt="" loading="lazy" decoding="async">{% endif %}</div></td>
+        <td class="th"><div class="tn">{% if book.cover_url %}<img src="{{ book.cover_url }}?size=thumb" alt="" loading="lazy" decoding="async">{% endif %}</div></td>
         <td class="tt">{% if gid %}<a href="/book/{{ gid }}">{{ book.title }}</a>{% else %}{{ book.title }}{% endif %}</td>
         <td class="au">{{ book.author or "" }}</td>
         <td class="s">{% if book.rating %}{{ stars(book.rating) }}{% else %}<span class="off">—</span>{% endif %}</td>
