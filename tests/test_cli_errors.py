@@ -64,6 +64,14 @@ class CliErrorBoundaryTests(unittest.TestCase):
             self._run(["edit", "123"])
         self.assertEqual(ctx.exception.code, 2)
 
+    def test_edit_unknown_id_is_clean(self):
+        self._run(["init"])
+        code, _out, err = self._run(["edit", "424242", "--local-notes", "x"])
+        self.assertEqual(code, 1)
+        self.assertIn("Error: No book found for Goodreads ID 424242", err)
+        self.assertIn("Next:", err)
+        self.assertNotIn("Traceback", err)
+
     def test_successful_command_returns_zero(self):
         code, out, _err = self._run(["init"])
         self.assertEqual(code, 0)

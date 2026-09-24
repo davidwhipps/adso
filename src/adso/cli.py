@@ -182,7 +182,15 @@ def _dispatch(args, parser) -> int:
             updates = _local_updates_from_args(args)
             if not updates:
                 parser.error("No local fields provided to update.")
-            db.update_local_fields(conn, args.goodreads_id, updates)
+            if get_book(conn, args.goodreads_id) is None:
+                raise AdsoError(
+                    f"No book found for Goodreads ID {args.goodreads_id}",
+                    hint="Run `adso search <title>` or `adso list` to find the ID.",
+                )
+            try:
+                db.update_local_fields(conn, args.goodreads_id, updates)
+            except ValueError as exc:
+                raise AdsoError(str(exc)) from exc
             print(f"Updated local catalogue fields for Goodreads ID {args.goodreads_id}")
             return 0
 
