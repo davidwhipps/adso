@@ -11,6 +11,7 @@ from adso.covers import (
     GOODREADS_AUTOCOMPLETE,
     ITUNES_SEARCH,
     OPENLIBRARY_SEARCH,
+    CoversError,
     fetch_covers,
     set_manual_cover,
 )
@@ -296,6 +297,72 @@ class CoversTests(unittest.TestCase):
         self.assertEqual(self._book("8")["cover_status"], "not_found")
         # Bounded: 3 attempts per request, a finite number of requests per book.
         self.assertLess(fake.calls, 20)
+
+    def _ol_isbn_hit(self, method, url, **kwargs):
+        if url.startswith("https://covers.openlibrary.org"):
+            return FakeResp(content=JPEG_BYTES)
+        raise AssertionError(f"unexpected request to {url}")
+
+    def test_locked_catalogue_write_is_retried(self) -> None:
+        self._add_book("20", "Busy", isbn13="9780156001311")
+        real_set_cover = db.set_cover
+        attempts = []
+
+        def flaky_set_cover(*args, **kwargs):
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise sqlite3.OperationalError("database is locked")
+            return real_set_cover(*args, **kwargs)
+
+        with patch("adso.covers._request", side_effect=self._ol_isbn_hit), patch(
+            "adso.covers.db.set_cover", side_effect=flaky_set_cover
+        ):
+            result = fetch_covers(self.conn, self.root)
+
+        self.assertEqual((result["fetched"], result["locked"]), (1, 0))
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(self._book("20")["cover_status"], "fetched")
+        self.assertEqual(sorted(p.name for p in (self.root / "covers").iterdir()), ["20.jpg"])
+
+    def test_persistently_locked_book_is_left_untouched(self) -> None:
+        self._add_book("21", "Held", isbn13="9780156001311")
+        (self.root / "covers").mkdir()
+        (self.root / "covers" / "21.png").write_bytes(PNG_BYTES)
+        db.set_cover(
+            self.conn,
+            int(self._book("21")["id"]),
+            cover_path="covers/21.png",
+            cover_source="itunes:search",
+            cover_source_url="https://example.com/old.png",
+            cover_status="fetched",
+        )
+
+        with patch("adso.covers._request", side_effect=self._ol_isbn_hit), patch(
+            "adso.covers.db.set_cover", side_effect=sqlite3.OperationalError("database is locked")
+        ):
+            result = fetch_covers(self.conn, self.root, refresh=True)
+
+        self.assertEqual((result["fetched"], result["locked"]), (0, 1))
+        book = self._book("21")
+        self.assertEqual(book["cover_source"], "itunes:search")
+        # The old file survives and no staged or new file is left behind.
+        self.assertEqual(sorted(p.name for p in (self.root / "covers").iterdir()), ["21.png"])
+
+    def test_run_stops_cleanly_when_catalogue_stays_locked(self) -> None:
+        for n in range(5):
+            self._add_book(str(30 + n), f"Book {n}", isbn13="9780156001311")
+
+        with patch("adso.covers._request", side_effect=self._ol_isbn_hit), patch(
+            "adso.covers.db.set_cover", side_effect=sqlite3.OperationalError("database is locked")
+        ), self.assertRaisesRegex(CoversError, "stayed locked"):
+            fetch_covers(self.conn, self.root)
+
+    def test_other_database_errors_are_not_swallowed(self) -> None:
+        self._add_book("22", "Broken", isbn13="9780156001311")
+        with patch("adso.covers._request", side_effect=self._ol_isbn_hit), patch(
+            "adso.covers.db.set_cover", side_effect=sqlite3.OperationalError("no such column: x")
+        ), self.assertRaisesRegex(sqlite3.OperationalError, "no such column"):
+            fetch_covers(self.conn, self.root)
 
     def test_migration_adds_cover_columns(self) -> None:
         # Build a pre-cover books table, then prove initialize() backfills columns.

@@ -33,6 +33,7 @@ automatic fetch.
 from __future__ import annotations
 
 import re
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any
@@ -281,6 +282,35 @@ def _remove_existing(data_dir: str | Path, cover_path: str | None) -> None:
         pass
 
 
+# Another writer (e.g. the Downloads-watcher Goodreads sync) can hold the
+# catalogue's write lock for longer than db.connect's busy_timeout. A cover run
+# takes an hour or more on a large library, so it waits and retries instead of
+# crashing; if the lock persists across several books it stops cleanly.
+LOCK_RETRIES = 4
+LOCK_RETRY_DELAY = 5.0
+MAX_CONSECUTIVE_LOCKED = 3
+
+
+def _is_locked(exc: sqlite3.OperationalError) -> bool:
+    message = str(exc).lower()
+    return "locked" in message or "busy" in message
+
+
+def _record_cover(conn, book_id: int, **fields: Any) -> bool:
+    """``db.set_cover`` that rides out a busy catalogue. False if it stayed locked."""
+    for attempt in range(1, LOCK_RETRIES + 1):
+        try:
+            db.set_cover(conn, book_id, **fields)
+            return True
+        except sqlite3.OperationalError as exc:
+            if not _is_locked(exc):
+                raise
+            conn.rollback()
+            if attempt < LOCK_RETRIES:
+                time.sleep(LOCK_RETRY_DELAY)
+    return False
+
+
 def _should_skip(status: str | None, refresh: bool, retry_missing: bool) -> bool:
     if status == "manual":
         return True  # never clobber a manual cover
@@ -309,15 +339,32 @@ def fetch_covers(
     books previously marked ``not_found`` (e.g. after adding a new source) while
     leaving already-fetched and manual covers untouched. ``refresh`` only ever
     upgrades: if a book that already has a cover misses or errors this time, its
-    existing cover is kept (counted as ``kept``). Returns summary stats.
+    existing cover is kept (counted as ``kept``). If the catalogue is locked by
+    another writer, the write is retried; a book whose write never gets through
+    is left exactly as it was (counted as ``locked``). Returns summary stats.
     """
     if limit is not None and limit < 1:
         raise CoversError("limit must be at least 1.")
 
     covers_dir = _covers_dir(data_dir)
-    fetched = not_found = errors = skipped = kept = 0
+    fetched = not_found = errors = skipped = kept = locked = 0
+    consecutive_locked = 0
     actions: list[dict[str, str]] = []
     attempted = 0
+
+    def note_write(ok: bool, goodreads_id, title: str) -> None:
+        nonlocal locked, consecutive_locked
+        if ok:
+            consecutive_locked = 0
+            return
+        locked += 1
+        consecutive_locked += 1
+        actions.append({"goodreads_id": str(goodreads_id), "title": title, "result": "locked"})
+        if consecutive_locked >= MAX_CONSECUTIVE_LOCKED:
+            raise CoversError(
+                "The catalogue stayed locked by another process (is a sync running?). "
+                "Covers fetched so far are saved; run fetch-covers again to continue."
+            )
 
     for row in db.iter_books(conn):
         book = dict(row)
@@ -348,7 +395,7 @@ def fetch_covers(
             errors += 1
             actions.append({"goodreads_id": str(goodreads_id), "title": title, "result": "error"})
             if not dry_run:
-                db.set_cover(
+                ok = _record_cover(
                     conn,
                     int(book["id"]),
                     cover_path=book.get("cover_path"),
@@ -356,6 +403,7 @@ def fetch_covers(
                     cover_source_url=book.get("cover_source_url"),
                     cover_status="error",
                 )
+                note_write(ok, goodreads_id, title)
             time.sleep(RATE_LIMIT_DELAY)
             continue
 
@@ -369,7 +417,7 @@ def fetch_covers(
             not_found += 1
             actions.append({"goodreads_id": str(goodreads_id), "title": title, "result": "not_found"})
             if not dry_run:
-                db.set_cover(
+                ok = _record_cover(
                     conn,
                     int(book["id"]),
                     cover_path=None,
@@ -377,19 +425,19 @@ def fetch_covers(
                     cover_source_url=None,
                     cover_status="not_found",
                 )
+                note_write(ok, goodreads_id, title)
             time.sleep(RATE_LIMIT_DELAY)
             continue
 
         data, source, source_url, ext = resolved
         rel_path = f"covers/{goodreads_id}.{ext}"
-        actions.append(
-            {"goodreads_id": str(goodreads_id), "title": title, "result": "fetched", "source": source}
-        )
         if not dry_run:
-            _remove_existing(data_dir, book.get("cover_path"))
+            # Stage the image, record it, then swap it in: if the catalogue
+            # stays locked, the book's existing file and row are untouched.
             covers_dir.mkdir(parents=True, exist_ok=True)
-            (Path(data_dir) / rel_path).write_bytes(data)
-            db.set_cover(
+            staged = Path(data_dir) / f"{rel_path}.part"
+            staged.write_bytes(data)
+            ok = _record_cover(
                 conn,
                 int(book["id"]),
                 cover_path=rel_path,
@@ -397,6 +445,18 @@ def fetch_covers(
                 cover_source_url=source_url,
                 cover_status="fetched",
             )
+            if not ok:
+                staged.unlink()
+                note_write(ok, goodreads_id, title)
+                time.sleep(RATE_LIMIT_DELAY)
+                continue
+            note_write(ok, goodreads_id, title)
+            staged.replace(Path(data_dir) / rel_path)
+            if book.get("cover_path") != rel_path:
+                _remove_existing(data_dir, book.get("cover_path"))
+        actions.append(
+            {"goodreads_id": str(goodreads_id), "title": title, "result": "fetched", "source": source}
+        )
         fetched += 1
         time.sleep(RATE_LIMIT_DELAY)
 
@@ -406,6 +466,7 @@ def fetch_covers(
         "errors": errors,
         "skipped": skipped,
         "kept": kept,
+        "locked": locked,
         "actions": actions,
     }
 

@@ -983,6 +983,7 @@ def _format_cover_result(result: dict[str, object], *, dry_run: bool) -> str:
         f"{result['fetched']} fetched, {result['not_found']} not found, "
         f"{result['errors']} errors, {result['skipped']} skipped"
         + (f", {result['kept']} kept existing cover" if result.get("kept") else "")
+        + (f", {result['locked']} skipped (catalogue locked)" if result.get("locked") else "")
     ]
     if dry_run:
         actions = result.get("actions", [])
