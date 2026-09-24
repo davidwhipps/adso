@@ -101,6 +101,62 @@ def _detect_image_ext(data: bytes) -> str | None:
     return None
 
 
+def image_size(path: str | Path) -> tuple[int, int] | None:
+    """Read ``(width, height)`` from an image file's header, or None.
+
+    Covers PNG, GIF, WEBP (VP8/VP8L/VP8X) and baseline/progressive JPEG by
+    parsing just the header bytes, so the web UI can lay out a masonry grid at
+    each cover's true shape without an imaging dependency.
+    """
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(32)
+            if head.startswith(b"\x89PNG\r\n\x1a\n") and head[12:16] == b"IHDR":
+                return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
+            if head[:6] in (b"GIF87a", b"GIF89a"):
+                return int.from_bytes(head[6:8], "little"), int.from_bytes(head[8:10], "little")
+            if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+                chunk = head[12:16]
+                if chunk == b"VP8X":
+                    return (
+                        int.from_bytes(head[24:27], "little") + 1,
+                        int.from_bytes(fh.read(3), "little") + 1,
+                    )
+                body = head[20:] + fh.read(16)
+                if chunk == b"VP8 " and body[3:6] == b"\x9d\x01\x2a":
+                    return (
+                        int.from_bytes(body[6:8], "little") & 0x3FFF,
+                        int.from_bytes(body[8:10], "little") & 0x3FFF,
+                    )
+                if chunk == b"VP8L" and body[:1] == b"\x2f":
+                    bits = int.from_bytes(body[1:5], "little")
+                    return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
+                return None
+            if head[:2] != b"\xff\xd8":
+                return None
+            # JPEG: walk the marker segments to the first start-of-frame.
+            fh.seek(2)
+            while True:
+                marker = fh.read(2)
+                if len(marker) < 2 or marker[0] != 0xFF:
+                    return None
+                code = marker[1]
+                if code == 0xFF:  # fill byte; re-sync one byte on
+                    fh.seek(-1, 1)
+                    continue
+                if code in (0xD8, 0x01) or 0xD0 <= code <= 0xD7:
+                    continue  # standalone markers carry no length
+                length = int.from_bytes(fh.read(2), "big")
+                if 0xC0 <= code <= 0xCF and code not in (0xC4, 0xC8, 0xCC):
+                    frame = fh.read(5)
+                    return int.from_bytes(frame[3:5], "big"), int.from_bytes(frame[1:3], "big")
+                if length < 2:
+                    return None
+                fh.seek(length - 2, 1)
+    except OSError:
+        return None
+
+
 def _download_image(url: str) -> tuple[bytes, str] | None:
     """Fetch ``url`` and return (bytes, ext) only if it is a valid image."""
     response = _request("get", url)

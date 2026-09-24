@@ -208,10 +208,20 @@ class BookLocalEditWebTests(unittest.TestCase):
         self.assertIn('id="detail-format-1"', body)
         self.assertNotIn("evil", body)
 
-    def test_catalogue_offers_quick_edit_trigger(self) -> None:
+    def test_catalogue_cards_open_the_book_sidebar(self) -> None:
+        # Cards link to the full page and carry the id adso.js uses to open the
+        # book sidebar (/book/{id}/inspect) instead.
         body = self.client.get("/").text
-        self.assertIn("Quick edit T", body)
-        self.assertIn("/book/1/local/panel?scope=shelf", body)
+        self.assertIn('href="/book/1" data-id="1"', body)
+
+    def test_inspector_renders_scoped_local_controls(self) -> None:
+        body = self.client.get("/book/1/inspect").text
+        self.assertIn('id="insp-format-1"', body)
+        self.assertIn('id="insp-loaned-1"', body)
+        self.assertIn('id="insp-notes-1"', body)
+        self.assertIn('id="insp-tags-1"', body)
+        self.assertIn('href="/book/1"', body)  # expand to the full page
+        self.assertEqual(self.client.get("/book/nope/inspect").status_code, 404)
 
     def test_tag_add_appends_and_normalises(self) -> None:
         body = self.client.post("/book/1/tags/add", data={"tag": "Philosophy"}).text

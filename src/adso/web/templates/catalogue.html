@@ -1,60 +1,120 @@
 {% extends "base.html" %}
-{% block title %}Adso · Catalogue{% endblock %}
-{% block content %}
-<form method="get" action="/" class="mb-6 flex flex-wrap items-center gap-2">
-  <input
-    type="search"
-    name="q"
-    value="{{ q }}"
-    placeholder="Search title, author, ISBN, notes…"
-    autofocus
-    class="input min-w-[16rem] flex-1">
-  <select name="status" onchange="this.form.submit()" class="input w-40">
-    <option value="">All statuses</option>
-    {% for s in statuses %}
-    <option value="{{ s }}" {{ "selected" if s == status }}>{{ s }}</option>
-    {% endfor %}
-  </select>
-  <select name="format" onchange="this.form.submit()" class="input w-40">
-    <option value="">All formats</option>
-    {% for f in formats %}
-    <option value="{{ f }}" {{ "selected" if f == format }}>{{ f | capitalize }}</option>
-    {% endfor %}
-  </select>
-  {% if tags or tag %}
-  <select name="tag" onchange="this.form.submit()" class="input w-40">
-    <option value="">All tags</option>
-    {% for t in tags %}
-    <option value="{{ t }}" {{ "selected" if t == tag }}>{{ t }}</option>
-    {% endfor %}
-  </select>
-  {% endif %}
-  <select name="rating" onchange="this.form.submit()" class="input w-40">
-    <option value="">Any rating</option>
-    {% for r in [5, 4, 3, 2, 1] %}
-    <option value="{{ r }}" {{ "selected" if rating == r | string }}>{{ "★" * r }}{{ "☆" * (5 - r) }}</option>
-    {% endfor %}
-    <option value="0" {{ "selected" if rating == "0" }}>Unrated</option>
-  </select>
-  <select name="sort" onchange="this.form.submit()" class="input w-40">
-    <option value="">Sort: Title</option>
-    <option value="added" {{ "selected" if sort == "added" }}>Sort: Recently added</option>
-  </select>
-  <button type="submit" class="btn">Search</button>
-  {% if q or status or format or tag or rating or sort %}
-  <a href="/" class="btn-outline">Clear</a>
-  {% endif %}
-</form>
+{% block title %}Adso · {{ lib.heading }}{% endblock %}
+{% block body_class %}is-library{% endblock %}
 
-{% if books %}
-{% include "_book_list.html" %}
-{% else %}
-<p class="mb-3 text-sm text-muted-foreground">{{ count }} book{{ "" if count == 1 else "s" }}</p>
-<div class="card">
-  <section class="py-6 text-muted-foreground">
-    No books found. Import a Goodreads export with
-    <code class="rounded bg-muted px-1 py-0.5 text-sm">adso import goodreads</code>.
-  </section>
+{% block menu_button %}
+<button type="button" class="circle menu-btn" id="menuBtn" aria-label="Show shelves and tags">
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 4.5h12M2 8h12M2 11.5h12"/></svg>
+</button>
+{% endblock %}
+
+{% block header_tools %}
+<div class="seg" id="views" role="group" aria-label="View">
+  <span class="thumb" aria-hidden="true"></span>
+  <button type="button" data-view="grid" class="{{ 'on' if p.view == 'grid' }}" title="Covers · 1">
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="2" y="2" width="5" height="7" rx="1"/><rect x="9" y="2" width="5" height="4" rx="1"/><rect x="2" y="11" width="5" height="3" rx="1"/><rect x="9" y="8" width="5" height="6" rx="1"/></svg><span class="lbl">Covers</span>
+  </button>
+  <button type="button" data-view="table" class="{{ 'on' if p.view == 'table' }}" title="Table · 2">
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h12"/></svg><span class="lbl">Table</span>
+  </button>
+  <button type="button" data-view="wall" class="{{ 'on' if p.view == 'wall' }}" title="Wall · 3">
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="2" y="2" width="3" height="3" rx=".6"/><rect x="6.5" y="2" width="3" height="3" rx=".6"/><rect x="11" y="2" width="3" height="3" rx=".6"/><rect x="2" y="6.5" width="3" height="3" rx=".6"/><rect x="6.5" y="6.5" width="3" height="3" rx=".6"/><rect x="11" y="6.5" width="3" height="3" rx=".6"/><rect x="2" y="11" width="3" height="3" rx=".6"/><rect x="6.5" y="11" width="3" height="3" rx=".6"/><rect x="11" y="11" width="3" height="3" rx=".6"/></svg><span class="lbl">Wall</span>
+  </button>
 </div>
-{% endif %}
+{% endblock %}
+
+{% block shell %}
+<div class="scrim" id="scrim"></div>
+<div class="shell {{ 'insp-open' if open_book }}" id="shell">
+  {# #browse is the region a facet/search/sort change swaps (sidebar + main);
+     the book sidebar lives outside it so it stays put while you browse. #}
+  <div id="browse" class="browse" data-view="{{ p.view }}" data-url="{{ p.query() }}"
+       hx-boost="true" hx-target="#browse" hx-select="#browse" hx-swap="outerHTML" hx-push-url="true">
+    {% include "_sidebar.html" %}
+    <main class="main" id="main" tabindex="-1">
+      <div class="tagrow-wrap">
+        <nav class="tagrow" id="tagrow" aria-label="Tags">
+          <a href="{{ p.query(tag='', book='') }}" class="pill {{ 'on' if not p.tag }}">All</a>
+          {% for t in lib.tags %}
+          <a href="{{ t.url }}" class="pill {{ 'on' if t.active }}">{{ t.label }}<span class="mono">{{ t.count }}</span></a>
+          {% endfor %}
+        </nav>
+      </div>
+
+      <div class="headrow">
+        <div>
+          <h1>{{ lib.heading }}</h1>
+          <p class="sub">{{ lib.subline }}</p>
+          {% if lib.chips %}
+          <div class="chips">
+            {% for label, url in lib.chips %}<a class="chip" href="{{ url }}">{{ label }}<span aria-label="Remove">×</span></a>{% endfor %}
+          </div>
+          {% endif %}
+        </div>
+        <div class="tools">
+          {% if p.view == "grid" %}
+          <button type="button" class="ghost" id="titlesBtn" hx-boost="false"><span class="switch"></span>Titles</button>
+          <label class="range" title="Cover size">
+            <svg width="10" height="12" viewBox="0 0 10 12" fill="currentColor" aria-hidden="true"><rect x="1" y="1" width="8" height="10" rx="1"/></svg>
+            <input type="range" id="size" min="110" max="320" step="10" value="190" aria-label="Cover size">
+            <svg width="14" height="17" viewBox="0 0 14 17" fill="currentColor" aria-hidden="true"><rect x="1" y="1" width="12" height="15" rx="1.5"/></svg>
+          </label>
+          {% endif %}
+          <details class="sortmenu">
+            <summary class="ghost"><span class="lab">Sort</span> <span class="mono">{{ sort_labels[p.sort] }}</span>
+              <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="m3 4.5 3 3 3-3"/></svg></summary>
+            <div class="pop">
+              {% for key, label in sorts %}
+              <a href="{{ p.query(sort=key) }}" class="{{ 'on' if p.sort == key }}">{{ label }}</a>
+              {% endfor %}
+            </div>
+          </details>
+        </div>
+      </div>
+
+      <div id="content" hx-boost="false">
+        {% if p.view == "wall" %}
+          {% include "_wall.html" %}
+        {% elif not lib.books %}
+          <div class="empty">
+            <div class="glyph" aria-hidden="true">A</div>
+            <b>Nothing here</b>
+            {% if lib.total %}<span>No books match this view.</span>
+            {% else %}<span>Import a Goodreads export with <code>adso import goodreads</code>.</span>{% endif %}
+          </div>
+        {% elif p.view == "table" %}
+          {% include "_table.html" %}
+        {% else %}
+          {% include "_grid.html" %}
+        {% endif %}
+      </div>
+    </main>
+  </div>
+
+  <aside class="insp" id="insp" aria-label="Book details">
+    <div class="insp-in" id="inspIn">{% if open_book %}{% with book = open_book %}{% include "_inspector.html" %}{% endwith %}{% endif %}</div>
+  </aside>
+</div>
+
+<div class="bulk" id="bulk" role="toolbar" aria-label="Selected books">
+  <span class="n" id="bulkCount"></span>
+  <button type="button" data-bulk="tag">Add tag</button>
+  <button type="button" data-bulk="format">Set format…</button>
+  <span class="sep"></span>
+  <button type="button" data-bulk="all">Select all</button>
+  <button type="button" data-bulk="none" aria-label="Clear selection"><svg width="10" height="10" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.7"><path d="m2.5 2.5 7 7M9.5 2.5l-7 7"/></svg></button>
+</div>
+<div class="tip" id="tip" aria-hidden="true"></div>
+<button type="button" class="circle help" id="helpBtn" aria-label="Keyboard shortcuts">?</button>
+<div class="keys" id="keys">
+  <h6>Library</h6>
+  <div>Search <span><kbd>/</kbd></span></div>
+  <div>Move <span><kbd>h</kbd><kbd>j</kbd><kbd>k</kbd><kbd>l</kbd></span></div>
+  <div>Open in sidebar <span><kbd>↵</kbd></span></div>
+  <div>Full page <span><kbd>f</kbd></span></div>
+  <div>Select <span><kbd>x</kbd></span></div>
+  <div>Covers · Table · Wall <span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd></span></div>
+  <div>Close / clear <span><kbd>esc</kbd></span></div>
+</div>
+<script type="application/json" id="allTags">{{ all_tags | tojson }}</script>
 {% endblock %}

@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Redesigned library web UI.** One library page replaces the Catalogue and To Read
+  pages. A sidebar lists shelves (Library = everything except to-read), smart views
+  (Loaned out, Read but unrated, Recently added, Five stars, Untagged) and tags, each
+  with the count clicking it would show, plus a row of tag buttons. Three views:
+  a masonry cover grid at each cover's real shape (with a size slider and optional
+  titles), a sortable table, and a wall of the whole library on one screen. Sort by
+  title, author, date added, rating, year or date read. Clicking a book opens it in a
+  sidebar where tags, format, loan and notes save as you edit; it expands to a
+  redesigned full book page with previous/next and "more by this author" rows.
+  Select several books (click **Select**, `x`, cmd- or shift-click, or table
+  checkboxes) to add a tag or set the format in one go. Keyboard: `/` search,
+  `h j k l` move, `↵` open, `f` full page, `1 2 3` switch view, `?` for the list.
+  New look throughout: warm palette with chartreuse accents, Fraunces and
+  Instrument Serif type, a blackletter logotype, dark mode (◐), and view
+  transitions between states. Fonts ship with the package (SIL OFL), so it all
+  works offline. `/to-read` now redirects to the To read shelf. Rating and shelf
+  stay read-only; they come from Goodreads.
 - **Goodreads covers**: `fetch-covers` now tries the book's own public Goodreads page first (the `.xml` variant of the URL, which isn't behind Goodreads' bot check), then Goodreads search suggestions, accepting only an exact Goodreads ID match. Open Library and Apple Books remain as fallbacks. Goodreads' "no photo" placeholder is ignored. On a real 1,067-book library this found all 138 covers that were previously `not_found`. Run `adso fetch-covers --refresh` to replace earlier title-search covers with the exact edition's cover. Manual covers are still never touched.
 - **Goodreads auto-sync on macOS** (`adso service install-sync|uninstall-sync`,
   `adso goodreads ingest|open|remind`): a LaunchAgent watches `~/Downloads` (or

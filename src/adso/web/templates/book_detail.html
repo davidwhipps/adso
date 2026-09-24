@@ -1,90 +1,91 @@
 {% extends "base.html" %}
 {% from "_stars.html" import stars %}
 {% block title %}Adso · {{ book.title }}{% endblock %}
-{% block content %}
-<a href="/" class="text-sm text-muted-foreground hover:text-foreground">← Catalogue</a>
-
-<div class="mt-2 mb-6 flex gap-6">
-  <img
-    src="/covers/{{ book.goodreads_id }}"
-    alt="Cover of {{ book.title }}"
-    class="h-48 w-32 shrink-0 rounded-lg border bg-muted object-cover">
-  <div class="min-w-0">
-    <h1 class="text-2xl font-semibold tracking-tight">{{ book.title }}</h1>
-    <p class="text-muted-foreground">
-      {{ book.author or "Unknown author" }}{% if book.additional_authors %}, {{ book.additional_authors }}{% endif %}
-    </p>
-  </div>
-</div>
-
-{% if book.description or book.subjects or book.subject_places or book.subject_times %}
-<div class="card mb-6">
-  <header class="flex items-center justify-between">
-    <h2>About</h2>
-    {% if book.metadata_source %}
-    <span class="text-xs text-muted-foreground">From Open Library</span>
-    {% endif %}
-  </header>
-  <section>
-    {% if book.description %}
-    <p class="max-w-prose whitespace-pre-line text-sm leading-relaxed">{{ book.description }}</p>
-    {% endif %}
-    {% if book.subjects %}
-    <div class="{{ 'mt-4' if book.description }}">
-      <h3 class="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Subjects</h3>
-      <div class="flex flex-wrap gap-1">
-        {% for s in book.subjects %}
-        <a href="/?q={{ s | urlencode }}" class="badge-secondary hover:underline">{{ s }}</a>
-        {% endfor %}
+{% block body_class %}is-book{% endblock %}
+{% block shell %}
+{% set gid = book.goodreads_id %}
+<div class="bookpage" data-book="{{ gid }}">
+  <div class="split">
+    <section class="stage" aria-label="Cover">
+      <div class="blur" style="background-image: url('/covers/{{ gid }}')"></div>
+      <a class="circle back" href="/?book={{ gid }}" data-back aria-label="Back to the library">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3 5 8l5 5"/></svg>
+      </a>
+      {% if book.date_added %}<div class="date">Catalogued {{ book.date_added | audate }}</div>{% endif %}
+      <div class="hero" style="--ar: {{ '%.3f' | format(book.ar or 1.5) }}">
+        <img src="/covers/{{ gid }}" alt="Cover of {{ book.title }}">
       </div>
-    </div>
-    {% endif %}
-    {% if book.subject_places %}
-    <div class="{{ 'mt-4' if book.description or book.subjects }}">
-      <h3 class="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Places</h3>
-      <div class="flex flex-wrap gap-1">
-        {% for s in book.subject_places %}
-        <a href="/?q={{ s | urlencode }}" class="badge-outline hover:underline">{{ s }}</a>
-        {% endfor %}
-      </div>
-    </div>
-    {% endif %}
-    {% if book.subject_times %}
-    <div class="{{ 'mt-4' if book.description or book.subjects or book.subject_places }}">
-      <h3 class="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Eras</h3>
-      <div class="flex flex-wrap gap-1">
-        {% for s in book.subject_times %}
-        <a href="/?q={{ s | urlencode }}" class="badge-outline hover:underline">{{ s }}</a>
-        {% endfor %}
-      </div>
-    </div>
-    {% endif %}
-  </section>
-</div>
-{% endif %}
-
-<div class="grid gap-6 md:grid-cols-2">
-  <div class="card">
-    <header><h2>Goodreads</h2></header>
-    <section>
-      <dl class="grid grid-cols-[8rem_1fr] gap-y-2 text-sm">
-        <dt class="text-muted-foreground">Goodreads ID</dt><dd>{{ book.goodreads_id or "—" }}</dd>
-        <dt class="text-muted-foreground">ISBN-13</dt><dd>{{ book.isbn13 or "—" }}</dd>
-        <dt class="text-muted-foreground">ISBN-10</dt><dd>{{ book.isbn10 or "—" }}</dd>
-        <dt class="text-muted-foreground">Reading status</dt><dd>{{ book.reading_status or "—" }}</dd>
-        <dt class="text-muted-foreground">Shelf</dt><dd>{{ book.exclusive_shelf or "—" }}</dd>
-        <dt class="text-muted-foreground">Shelves</dt><dd>{{ book.shelves | join(", ") if book.shelves else "—" }}</dd>
-        <dt class="text-muted-foreground">My rating</dt>
-        <dd>{% if book.rating is not none and book.rating %}<span class="inline-flex items-center gap-2">{{ stars(book.rating) }}<span class="text-muted-foreground">{{ book.rating }}</span></span>{% else %}—{% endif %}</dd>
-        <dt class="text-muted-foreground">Average</dt>
-        <dd>{% if book.average_rating %}<span class="inline-flex items-center gap-2">{{ stars(book.average_rating, muted=True) }}<span class="text-muted-foreground">{{ book.average_rating }}</span></span>{% else %}—{% endif %}</dd>
-        <dt class="text-muted-foreground">Date read</dt><dd>{{ book.date_read | audate }}</dd>
-        <dt class="text-muted-foreground">Date added</dt><dd>{{ book.date_added | audate }}</dd>
-        <dt class="text-muted-foreground">Review</dt><dd class="whitespace-pre-line">{{ book.my_review or "—" }}</dd>
-      </dl>
+      <nav class="nextprev" id="nextprev" hidden aria-label="Previous and next book">
+        <a class="circle" data-step="-1" aria-label="Previous book"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3 5 8l5 5"/></svg></a>
+        <span class="mono" id="npPos"></span>
+        <a class="circle" data-step="1" aria-label="Next book"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m6 3 5 5-5 5"/></svg></a>
+      </nav>
     </section>
+
+    <div class="fullpanel">
+      <div class="b-top">
+        <span class="b-kick"><span class="dot {{ book.exclusive_shelf or '' }}">{{ shelf_label or "No shelf" }}</span></span>
+      </div>
+      <h1 class="b-title">{{ book.title }}</h1>
+      <p class="b-by">
+        {% if book.author %}by <a href="/?author={{ book.author | urlencode }}">{{ book.author }}</a>{% else %}Unknown author{% endif %}{% if book.additional_authors %}, {{ book.additional_authors }}{% endif %}
+        {% set year = book.original_publication_year or book.year_published %}{% if year %} <span class="mono">· {{ year }}</span>{% endif %}
+      </p>
+      <div class="b-rating">
+        {% if book.rating %}{{ stars(book.rating) }}{% else %}<span class="unrated">Not rated</span>{% endif %}
+        {% if book.average_rating %}<span class="mono">Goodreads {{ book.average_rating }}</span>{% endif %}
+      </div>
+
+      {% include "_local_fields.html" %}
+
+      <section class="facts">
+        <h2 class="flabel">From Goodreads</h2>
+        <dl class="rows">
+          <div class="row"><dt>Goodreads ID</dt><dd class="mono">{{ gid or "—" }}</dd></div>
+          <div class="row"><dt>ISBN-13</dt><dd class="mono">{{ book.isbn13 or "—" }}</dd></div>
+          <div class="row"><dt>ISBN-10</dt><dd class="mono">{{ book.isbn10 or "—" }}</dd></div>
+          <div class="row"><dt>Reading status</dt><dd>{{ book.reading_status or "—" }}</dd></div>
+          <div class="row"><dt>Shelves</dt><dd>{{ book.shelves | join(", ") if book.shelves else "—" }}</dd></div>
+          <div class="row"><dt>Date read</dt><dd class="mono">{{ book.date_read | audate }}</dd></div>
+          <div class="row"><dt>Date added</dt><dd class="mono">{{ book.date_added | audate }}</dd></div>
+          {% if book.number_of_pages %}<div class="row"><dt>Pages</dt><dd class="mono">{{ book.number_of_pages }}</dd></div>{% endif %}
+          {% if book.publisher %}<div class="row"><dt>Publisher</dt><dd>{{ book.publisher }}</dd></div>{% endif %}
+        </dl>
+        {% if book.my_review %}
+        <h3 class="flabel">My review</h3>
+        <p class="review">{{ book.my_review }}</p>
+        {% endif %}
+      </section>
+
+      {% if book.description or book.subjects or book.subject_places or book.subject_times %}
+      <section class="about">
+        <h2 class="flabel">About{% if book.metadata_source %} <span class="src">· from Open Library</span>{% endif %}</h2>
+        {% if book.description %}<div class="desc">{{ book.description }}</div>{% endif %}
+        {% for heading, items in [("Subjects", book.subjects), ("Places", book.subject_places), ("Eras", book.subject_times)] if items %}
+        <h3 class="flabel">{{ heading }}</h3>
+        <div class="subjects">
+          {% for s in items %}<a href="/?q={{ s | urlencode }}" class="chipsm">{{ s }}</a>{% endfor %}
+        </div>
+        {% endfor %}
+      </section>
+      {% endif %}
+    </div>
   </div>
 
-  {% include "_local_fields.html" %}
+  {% if by_author or also_tagged %}
+  <div class="also">
+    {% for heading, em, items in [("More by", book.author, by_author), ("Also tagged", "#" ~ (book.tags[0] if book.tags else ""), also_tagged)] if items %}
+    <h3>{{ heading }} <em>{{ em }}</em><span class="mono">{{ items | length }}</span></h3>
+    <div class="strip">
+      {% for b in items %}
+      <a class="s-it" href="/book/{{ b.goodreads_id }}" style="--d: {{ loop.index0 * 30 }}ms">
+        <div class="cv"><div class="fb"><span>{{ b.title }}</span></div><img src="{{ b.cover_url }}" alt="" loading="lazy" decoding="async"></div>
+        <div class="t">{{ b.title }}</div>
+      </a>
+      {% endfor %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
 </div>
 {% endblock %}

@@ -1,20 +1,18 @@
-{# Local-catalogue card on the book detail page: every field is always live and
+{# Local-catalogue block on the book page: every field is always live and
    autosaves on change — no edit/save toggle. The same field partials power the
-   list-page quick-edit popover (see _local_panel.html); only this container
-   differs. Expects `book`, `all_tags`. #}
+   library's book sidebar (scope "insp") and the quick-edit popover (see
+   _local_panel.html); only this container differs. Expects `book`, `all_tags`. #}
 {% set scope = "detail" %}
-<div class="card">
-  <header><h2>Local catalogue</h2></header>
-  <section>
-    <p class="mb-5 text-xs text-muted-foreground">Local only — yours, never synced to Goodreads. Changes save as you make them.</p>
-    <div class="grid gap-5">
-      {% include "_field_format.html" %}
-      {% include "_field_loaned.html" %}
-      <div class="grid gap-1.5 text-sm">
-        <span class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Tags</span>
-        {% include "_local_tags.html" %}
-      </div>
-      {% include "_field_notes.html" %}
+<section class="localcard">
+  <h2 class="flabel">Local catalogue</h2>
+  <p class="localnote">Local only — yours, never synced to Goodreads. Changes save as you make them.</p>
+  <div class="b-fields">
+    <div class="grid gap-1.5 text-sm">
+      <span class="flabel">Tags</span>
+      {% include "_local_tags.html" %}
     </div>
-  </section>
-</div>
+    {% include "_field_format.html" %}
+    {% include "_field_loaned.html" %}
+    {% include "_field_notes.html" %}
+  </div>
+</section>
