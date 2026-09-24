@@ -1,0 +1,27 @@
+{# Library sidebar: shelves, smart views and tags, each with the count that
+   clicking it would show. Links are boosted by #browse. Expects `lib`, `p`. #}
+<aside class="side" id="side" aria-label="Shelves and tags">
+  <a href="{{ p.query(shelf='', smart='', tag='', book='') }}" class="nav {{ 'on' if not (p.shelf or p.smart or p.tag) }}">Library<span class="n">{{ lib.library_count }}</span></a>
+
+  <h5><i>01</i>Shelves</h5>
+  {% for f in lib.shelves %}
+  <a href="{{ f.url }}" class="nav {{ 'on' if f.active }} {{ 'zero' if not f.count }}">{{ f.label }}<span class="n">{{ f.count }}</span></a>
+  {% endfor %}
+
+  <h5><i>02</i>Smart views</h5>
+  {% for f in lib.smart %}
+  <a href="{{ f.url }}" class="nav {{ 'on' if f.active }} {{ 'zero' if not f.count }}">{{ f.label }}<span class="n">{{ f.count }}</span></a>
+  {% endfor %}
+
+  <h5><i>03</i>Tags</h5>
+  {% if lib.tags | length > 8 %}
+  <input class="tagfilter" id="tagfilter" placeholder="Filter tags" aria-label="Filter tags" hx-boost="false">
+  {% endif %}
+  <div id="sideTags">
+    {% for f in lib.tags %}
+    <a href="{{ f.url }}" class="nav {{ 'on' if f.active }} {{ 'zero' if not f.count }}" data-tag="{{ f.key }}"><span class="hash">#</span>{{ f.label }}<span class="n">{{ f.count }}</span></a>
+    {% else %}
+    <p class="side-note">No tags yet. Open a book and add one, or select several and use <b>Add tag</b>.</p>
+    {% endfor %}
+  </div>
+</aside>

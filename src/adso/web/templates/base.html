@@ -4,66 +4,79 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Adso{% endblock %}</title>
+  {# Apply the saved (or system) theme before first paint so there's no flash. #}
+  <script>
+    try {
+      const t = localStorage.getItem("adso_theme");
+      if (t === "dark" || (!t && matchMedia("(prefers-color-scheme: dark)").matches)) document.documentElement.classList.add("dark");
+    } catch (e) {}
+  </script>
+  <link rel="preload" href="/static/fonts/geist.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/static/fonts/fraunces.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/static/app.css?v={{ css_version }}">
   <link rel="icon" type="image/png" sizes="32x32" href="/static/icon-32.png">
   <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
   <link rel="manifest" href="/static/manifest.webmanifest">
   <meta name="apple-mobile-web-app-title" content="Adso">
-  <meta name="theme-color" content="#f6f4e9">
+  <meta name="theme-color" content="#f6f5f1">
 </head>
-<body class="min-h-screen bg-background text-foreground font-sans antialiased">
-  <header class="sticky top-0 z-10 border-b bg-[#f6f4e9]/95 backdrop-blur">
-    <div class="mx-auto flex h-14 max-w-5xl items-center gap-3 px-4">
-      <a href="/" class="text-lg font-semibold tracking-tight">Adso</a>
-      <span class="hidden sm:inline-flex items-center rounded-md border border-[#d9d0a0] bg-[#ece4bb] px-2 py-0.5 text-xs font-medium text-[#6b6220]">local</span>
-      {% set path = request.url.path if request else "" %}
-      <nav class="ml-auto flex items-center gap-4 text-sm">
-        <a href="/" class="{{ 'text-foreground font-medium' if path == '/' else 'text-muted-foreground hover:text-foreground' }}">Catalogue</a>
-        <a href="/to-read" class="{{ 'text-foreground font-medium' if path == '/to-read' else 'text-muted-foreground hover:text-foreground' }}">To Read</a>
-        <div
-          class="relative"
-          x-data="{ open: false, timer: null, show() { clearTimeout(this.timer); this.open = true }, hide() { this.timer = setTimeout(() => this.open = false, 250) } }"
-          @mouseenter="show()"
-          @mouseleave="hide()"
-          @focusout="if (!$el.contains($event.relatedTarget)) open = false">
-          <button
-            type="button"
-            @click="open = !open"
-            @keydown.escape="open = false"
-            :aria-expanded="open"
-            aria-haspopup="true"
-            class="flex items-center gap-1.5 {{ 'text-foreground font-medium' if path in ['/import', '/export', '/activity', '/review'] else 'text-muted-foreground hover:text-foreground' }}">
-            More
-            <span aria-hidden="true" class="text-xs">▾</span>
-            {% include "_nav_badge.html" %}
-          </button>
-          {# The pt-2 wrapper bridges the visual gap between the trigger and the
-             panel so the pointer never leaves the hover area mid-transition. #}
-          <div
-            x-show="open"
-            x-cloak
-            class="absolute right-0 top-full z-20 pt-2">
-            <div role="menu" class="w-44 rounded-md border bg-background p-1 shadow-md">
-              <a href="/import" role="menuitem" class="block rounded px-2 py-1.5 text-muted-foreground hover:bg-muted hover:text-foreground">Import</a>
-              <a href="/export" role="menuitem" class="block rounded px-2 py-1.5 text-muted-foreground hover:bg-muted hover:text-foreground">Export</a>
-              <a href="/activity" role="menuitem" class="block rounded px-2 py-1.5 text-muted-foreground hover:bg-muted hover:text-foreground">Activity</a>
-              <a href="/review" role="menuitem" class="flex items-center justify-between gap-2 rounded px-2 py-1.5 text-muted-foreground hover:bg-muted hover:text-foreground">
-                <span>Review</span>
-                {% if review_count %}<span class="badge-destructive">{{ review_count }}</span>{% endif %}
-              </a>
-            </div>
+<body class="{% block body_class %}is-page{% endblock %}">
+  {% set path = request.url.path if request else "" %}
+  <header class="topbar">
+    <div class="brand">
+      {% block menu_button %}{% endblock %}
+      <a href="/" class="logo" aria-label="Adso — library">Adso</a>
+    </div>
+    <form class="search" id="search" action="/" method="get" role="search">
+      <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="9" cy="9" r="6"/><path d="m13.5 13.5 4 4" stroke-linecap="round"/></svg>
+      <input id="q" name="q" type="search" value="{{ p.q if p is defined else '' }}" autocomplete="off" spellcheck="false" aria-label="Search the library">
+      <span class="rot" id="rot" aria-hidden="true"></span>
+      <kbd class="hk" aria-hidden="true">/</kbd>
+      <button type="button" class="clr" id="clr" aria-label="Clear search"><svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6"><path d="m2 2 8 8M10 2l-8 8"/></svg></button>
+    </form>
+    <div class="right">
+      {% block header_tools %}{% endblock %}
+      <div class="more"
+           x-data="{ open: false, timer: null, show() { clearTimeout(this.timer); this.open = true }, hide() { this.timer = setTimeout(() => this.open = false, 250) } }"
+           @mouseenter="show()" @mouseleave="hide()"
+           @focusout="if (!$el.contains($event.relatedTarget)) open = false">
+        <button type="button" class="circle {{ 'on' if path in ['/import', '/export', '/activity', '/review'] }}"
+                @click="open = !open" @keydown.escape="open = false"
+                :aria-expanded="open" aria-haspopup="true" aria-label="More">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.5" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="12.5" cy="8" r="1.3"/></svg>
+          {% include "_nav_badge.html" %}
+        </button>
+        {# The pt-2 wrapper bridges the gap between trigger and panel so the
+           pointer never leaves the hover area mid-transition. #}
+        <div x-show="open" x-cloak x-transition.opacity.duration.150ms class="more-panel">
+          <div role="menu" class="pop">
+            <a href="/?shelf=to-read" role="menuitem">To read</a>
+            <a href="/import" role="menuitem" class="{{ 'on' if path == '/import' }}">Import</a>
+            <a href="/export" role="menuitem" class="{{ 'on' if path == '/export' }}">Export</a>
+            <a href="/activity" role="menuitem" class="{{ 'on' if path == '/activity' }}">Activity</a>
+            <a href="/review" role="menuitem" class="{{ 'on' if path == '/review' }}">
+              <span>Review</span>
+              {% if review_count %}<span class="badge-destructive">{{ review_count }}</span>{% endif %}
+            </a>
           </div>
         </div>
-      </nav>
+      </div>
+      <button type="button" class="circle theme-btn" id="themeBtn" aria-label="Toggle dark mode">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5a5.5 5.5 0 0 0 0 11z" fill="currentColor"/></svg>
+      </button>
     </div>
   </header>
-  <main class="mx-auto max-w-5xl px-4 py-8">
+
+  {% block shell %}
+  <main class="page">
     {% block content %}{% endblock %}
+    <footer class="page-foot">Local-first · served from your own SQLite catalogue</footer>
   </main>
-  <footer class="mx-auto max-w-5xl px-4 pb-10 text-sm text-muted-foreground">
-    Local-first · served from your own SQLite catalogue
-  </footer>
+  {% endblock %}
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script src="/static/vendor/htmx.min.js"></script>
   <script defer src="/static/vendor/alpine.min.js"></script>
+  <script src="/static/adso.js?v={{ js_version }}"></script>
 </body>
 </html>

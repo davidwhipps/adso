@@ -1,0 +1,62 @@
+{# Book sidebar on the library page: cover, the Goodreads facts (read-only), and
+   the local fields, which autosave through the same partials as the full page
+   at scope "insp". Expects `book`, `all_tags`. #}
+{% from "_stars.html" import stars %}
+{% set scope = "insp" %}
+{% set gid = book.goodreads_id %}
+<div class="stagebox">
+  <div class="blur" style="background-image: url('{{ book.cover_url }}')"></div>
+  <div class="ctl">
+    <a class="circle sm" href="/book/{{ gid }}" data-expand title="Full page (f)" aria-label="Open full page">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2.5h4v4M13.5 2.5 9 7M6.5 13.5h-4v-4M2.5 13.5 7 9"/></svg>
+    </a>
+    <span class="sp"></span>
+    <button type="button" class="circle sm" data-close aria-label="Close">
+      <svg width="13" height="13" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m2.5 2.5 7 7M9.5 2.5l-7 7"/></svg>
+    </button>
+  </div>
+  <a class="icv" href="/book/{{ gid }}" data-expand style="aspect-ratio: 1 / {{ '%.3f' | format(book.ar or 1.5) }}">
+    <img src="{{ book.cover_url }}" alt="Cover of {{ book.title }}">
+  </a>
+</div>
+
+<div class="insp-body" data-book="{{ gid }}">
+  <h2 class="b-title">{{ book.title }}</h2>
+  <p class="b-by">
+    {% if book.author %}by <a href="/?author={{ book.author | urlencode }}">{{ book.author }}</a>{% endif %}
+    {% set year = book.original_publication_year or book.year_published %}{% if year %} <span class="mono">· {{ year }}</span>{% endif %}
+  </p>
+  <div class="b-rating">
+    {% if book.rating %}{{ stars(book.rating) }}{% else %}<span class="unrated">Not rated</span>{% endif %}
+    {% if book.average_rating %}<span class="mono">Goodreads {{ book.average_rating }}</span>{% endif %}
+  </div>
+
+  <div class="b-fields">
+    <div class="b-shelf">
+      <span class="dot {{ book.exclusive_shelf or '' }}">{{ shelf_labels.get(book.exclusive_shelf or '', book.reading_status or 'No shelf') }}</span>
+      {% if book.date_read %}<span class="mono">read {{ book.date_read | audate }}</span>{% endif %}
+    </div>
+    <div class="grid gap-1.5 text-sm">
+      <span class="flabel">Tags</span>
+      {% include "_local_tags.html" %}
+    </div>
+    {% include "_field_format.html" %}
+    {% include "_field_loaned.html" %}
+    {% include "_field_notes.html" %}
+  </div>
+
+  <dl class="rows">
+    <div class="row"><dt>Added</dt><dd class="mono">{{ book.date_added | audate }}</dd></div>
+    {% if book.number_of_pages %}<div class="row"><dt>Pages</dt><dd class="mono">{{ book.number_of_pages }}</dd></div>{% endif %}
+    {% if book.publisher %}<div class="row"><dt>Publisher</dt><dd>{{ book.publisher }}</dd></div>{% endif %}
+  </dl>
+
+  {% if book.description %}
+  <div class="desc clamp">{{ book.description }}</div>
+  <button type="button" class="more" data-more>Read more</button>
+  {% endif %}
+
+  <div class="actions">
+    <a class="btn-ink" href="/book/{{ gid }}" data-expand>Open full page</a>
+  </div>
+</div>

@@ -1,0 +1,38 @@
+{# Library table. Column headers sort via the same URL params as the sort menu;
+   clicking a row opens the book sidebar (adso.js), the title links to the full
+   page. The Format cell keeps its `row-format-*` id so a quick edit's
+   out-of-band swap still updates it. Expects `lib`, `p`, `open_book`. #}
+{% from "_stars.html" import stars %}
+{% set cols = [("title", "Title", ""), ("author", "Author", ""), ("rating", "Rating", ""), (None, "Shelf", ""), (None, "Format", "hide-sm"), (None, "Tags", "hide-sm"), ("year", "Year", "hide-sm"), ("added", "Added", "hide-sm")] %}
+<div class="tablecard">
+  <table class="libtable">
+    <thead>
+      <tr>
+        <th class="w-cb"><input type="checkbox" class="cb" id="selAll" aria-label="Select all"></th>
+        <th class="w-th"></th>
+        {% for key, label, cls in cols %}
+        <th class="{{ cls }} {{ 'sorted' if key and p.sort == key }}">
+          {% if key %}<a href="{{ p.query(sort=key) }}" hx-boost="true" hx-target="#browse" hx-select="#browse" hx-swap="outerHTML" hx-push-url="true">{{ label }}{% if p.sort == key %}<span class="ar" aria-hidden="true">↓</span>{% endif %}</a>{% else %}{{ label }}{% endif %}
+        </th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for book in lib.books %}
+      {% set gid = book.goodreads_id %}
+      <tr {% if gid %}data-id="{{ gid }}"{% endif %} data-i="{{ loop.index0 }}" class="{{ 'open' if open_book and open_book.goodreads_id == gid }}">
+        <td>{% if gid %}<input type="checkbox" class="cb" data-cb aria-label="Select {{ book.title }}">{% endif %}</td>
+        <td class="th"><div class="tn">{% if book.cover_url %}<img src="{{ book.cover_url }}" alt="" loading="lazy" decoding="async">{% endif %}</div></td>
+        <td class="tt">{% if gid %}<a href="/book/{{ gid }}">{{ book.title }}</a>{% else %}{{ book.title }}{% endif %}</td>
+        <td class="au">{{ book.author or "" }}</td>
+        <td class="s">{% if book.rating %}{{ stars(book.rating) }}{% else %}<span class="off">—</span>{% endif %}</td>
+        <td><span class="dot {{ book.exclusive_shelf or '' }}">{{ shelf_labels.get(book.exclusive_shelf or '', book.reading_status or '—') }}</span>{% if book.loaned_to %} <span class="chipsm">Loaned</span>{% endif %}</td>
+        <td class="hide-sm">{% if gid %}<span id="row-format-{{ gid }}">{% include "_format_badge.html" %}</span>{% else %}{% include "_format_badge.html" %}{% endif %}</td>
+        <td class="hide-sm">{% for t in book.tags %}<span class="chipsm">{{ t }}</span>{% endfor %}</td>
+        <td class="hide-sm d mono">{{ book.original_publication_year or book.year_published or "" }}</td>
+        <td class="hide-sm d mono">{{ book.date_added | audate }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>

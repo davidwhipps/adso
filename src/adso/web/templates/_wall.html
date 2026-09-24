@@ -1,0 +1,15 @@
+{# The whole library as tiny tiles on one screen. Filters don't remove books
+   here; they fade the ones that don't match. Expects `lib`, `open_book`. #}
+{% set filtered = lib.books | length != lib.wall | length %}
+<p class="wallhint">Your whole library at a glance{% if filtered %}, with {{ lib.books | length }} {{ "match" if lib.books | length == 1 else "matches" }} highlighted{% endif %}. Hover to peek, click to open.</p>
+<div class="wall {{ 'dim' if filtered }}" id="wall">
+  {% for book in lib.wall %}
+  {% set gid = book.goodreads_id %}
+  <a class="w {{ 'match' if gid in lib.match_ids }} {{ 'open' if open_book and open_book.goodreads_id == gid }}"
+     {% if gid %}href="/book/{{ gid }}" data-id="{{ gid }}"{% endif %} data-i="{{ loop.index0 }}"
+     data-title="{{ book.title }}" data-author="{{ book.author or '' }}" data-rating="{{ book.rating or 0 }}"
+     style="--d: {{ [loop.index0 * 1.2, 500] | min | int }}ms" aria-label="{{ book.title }}">
+    {% if book.cover_url %}<img src="{{ book.cover_url }}" alt="" loading="lazy" decoding="async">{% endif %}
+  </a>
+  {% endfor %}
+</div>

@@ -32,7 +32,6 @@ from .. import reports as reports_service
 from .. import sync as sync_service
 from ..catalogue import (
     BookFilters,
-    distinct_statuses,
     distinct_tags,
     get_book,
     list_books,
@@ -40,14 +39,20 @@ from ..catalogue import (
 )
 from ..config import ResolvedConfig, mask_secret
 from ..notion import NotionConfigError, export_to_notion
+from .library import (
+    COVER_SHAPES,
+    SHELF_LABELS,
+    SORT_LABELS,
+    SORTS,
+    TO_READ_SHELF,
+    LibraryParams,
+    build_library,
+    sort_books,
+)
 
 WEB_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = WEB_DIR / "templates"
 STATIC_DIR = WEB_DIR / "static"
-
-# Goodreads' raw exclusive-shelf value for want-to-read books. It is the single
-# axis that splits the Catalogue (everything else) from the To Read page.
-TO_READ_SHELF = "to-read"
 
 # Muted tints for the generated placeholder shown when a book has no cover.
 _PLACEHOLDER_TINTS = ("#6b7280", "#7c6f64", "#5f7470", "#6d6875", "#785964", "#4a6670")
@@ -70,6 +75,19 @@ def _placeholder_svg(label: str) -> str:
         'font-size="72" font-weight="600" text-anchor="middle" dominant-baseline="central">'
         f"{initials}</text></svg>"
     )
+
+
+class _AssetVersion:
+    """Renders as a static file's mtime, re-read each time a template uses it."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def __str__(self) -> str:
+        try:
+            return str(int(self.path.stat().st_mtime))
+        except OSError:
+            return "0"
 
 
 def _short_au_date(value: object) -> str:
@@ -179,12 +197,12 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         openapi_url="/api/openapi.json",
     )
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
-    # Cache-bust the stylesheet by its mtime so browsers pick up a rebuilt
-    # app.css after an upgrade instead of serving a stale cached copy.
-    _css_path = STATIC_DIR / "app.css"
-    templates.env.globals["css_version"] = (
-        int(_css_path.stat().st_mtime) if _css_path.exists() else 0
-    )
+    # Cache-bust the stylesheet and script by their mtimes so browsers pick up a
+    # rebuilt asset after an upgrade (or an edit mid-session) instead of serving
+    # a stale cached copy. Read at render time; a stat per page is negligible.
+    templates.env.globals["css_version"] = _AssetVersion(STATIC_DIR / "app.css")
+    templates.env.globals["js_version"] = _AssetVersion(STATIC_DIR / "adso.js")
+    templates.env.globals.update(sorts=SORTS, sort_labels=SORT_LABELS, shelf_labels=SHELF_LABELS)
     templates.env.filters["audate"] = _short_au_date
 
     if STATIC_DIR.exists():
@@ -267,80 +285,72 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
             return search_books(conn, q, filters)
         return list_books(conn, filters)
 
+    def _book_or_404(conn: sqlite3.Connection, goodreads_id: str) -> dict:
+        book = get_book(conn, goodreads_id)
+        if book is None:
+            raise HTTPException(status_code=404, detail=f"No book for Goodreads ID {goodreads_id}")
+        book["ar"] = COVER_SHAPES.ratio(cover_root, book.get("cover_path"))
+        return book
+
     @app.get("/", response_class=HTMLResponse)
     def index(
         request: Request,
         conn: sqlite3.Connection = Depends(get_conn),
         q: str = Query("", description="Search query"),
+        shelf: str | None = Query(None),
+        smart: str | None = Query(None),
+        tag: str | None = Query(None),
         status: str | None = Query(None),
         format: str | None = Query(None),
-        tag: str | None = Query(None),
         author: str | None = Query(None),
         rating: str | None = Query(None),
         sort: str | None = Query(None),
-        limit: int | None = Query(None, ge=1),
+        view: str | None = Query(None),
+        book: str | None = Query(None, description="Goodreads ID to open in the book sidebar"),
     ) -> HTMLResponse:
-        rating_value = _rating_param(rating)
-        # The Catalogue is everything that isn't want-to-read; the To Read page
-        # owns the to-read shelf. Excluding it here keeps the two contexts apart.
-        filters = _filters(
-            status, format, tag, author, rating_value, limit,
-            exclude_shelf=TO_READ_SHELF, sort=sort,
+        params = LibraryParams.clean(
+            q=q, shelf=shelf, smart=smart, tag=tag, status=status, format=format,
+            author=author, rating=_rating_param(rating), sort=sort, view=view, book=book,
         )
-        books = _query_books(conn, q, filters)
-        # "To Read" is a status the To Read page owns, so drop it from the
-        # Catalogue's status filter — it would only ever return nothing here.
-        statuses = [s for s in distinct_statuses(conn) if s.strip().lower() != "to read"]
+        library = build_library(conn, params, cover_root)
+        # The book sidebar survives a reload (and a trip to the full page and
+        # back) because its book rides in the URL.
+        open_book = get_book(conn, params.book) if params.book else None
+        if open_book is not None:
+            open_book["ar"] = COVER_SHAPES.ratio(cover_root, open_book.get("cover_path"))
         return templates.TemplateResponse(
             request,
             "catalogue.html",
             {
-                "books": books,
-                "q": q,
-                "status": status or "",
-                "format": format or "",
-                "tag": tag or "",
-                "author": author or "",
-                "rating": "" if rating_value is None else str(rating_value),
-                "sort": filters.sort or "",
-                "statuses": statuses,
-                "formats": db.VALID_FORMATS,
-                "tags": distinct_tags(conn),
-                "count": len(books),
+                "lib": library,
+                "p": params,
+                "open_book": open_book,
+                "all_tags": distinct_tags(conn),
                 **_nav_ctx(conn),
             },
         )
 
-    @app.get("/to-read", response_class=HTMLResponse)
+    @app.get("/to-read")
     def to_read(
-        request: Request,
-        conn: sqlite3.Connection = Depends(get_conn),
-        q: str = Query("", description="Search query"),
+        q: str = Query(""),
         tag: str | None = Query(None),
         sort: str | None = Query(None),
-        limit: int | None = Query(None, ge=1),
+    ) -> RedirectResponse:
+        # To Read is now a shelf in the library sidebar; keep old links working.
+        params = LibraryParams.clean(q=q, tag=tag, sort=sort, shelf=TO_READ_SHELF)
+        return RedirectResponse(params.query(), status_code=307)
+
+    @app.get("/book/{goodreads_id}/inspect", response_class=HTMLResponse)
+    def book_inspect(
+        request: Request,
+        goodreads_id: str,
+        conn: sqlite3.Connection = Depends(get_conn),
     ) -> HTMLResponse:
-        # The To Read page is inherently the want-to-read shelf: no status or
-        # rating filters (unread books have neither), just search + tag.
-        filters = BookFilters(
-            shelf=TO_READ_SHELF,
-            tag=(tag or "").strip() or None,
-            limit=limit,
-            sort=sort if sort == "added" else None,
-        )
-        books = _query_books(conn, q, filters)
+        """The book sidebar's contents, fetched when a cover is opened."""
         return templates.TemplateResponse(
             request,
-            "to_read.html",
-            {
-                "books": books,
-                "q": q,
-                "tag": tag or "",
-                "sort": filters.sort or "",
-                "tags": distinct_tags(conn),
-                "count": len(books),
-                **_nav_ctx(conn),
-            },
+            "_inspector.html",
+            {"book": _book_or_404(conn, goodreads_id), "all_tags": distinct_tags(conn)},
         )
 
     @app.get("/book/{goodreads_id}", response_class=HTMLResponse)
@@ -349,25 +359,73 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         goodreads_id: str,
         conn: sqlite3.Connection = Depends(get_conn),
     ) -> HTMLResponse:
-        book = get_book(conn, goodreads_id)
-        if book is None:
-            raise HTTPException(status_code=404, detail=f"No book for Goodreads ID {goodreads_id}")
+        book = _book_or_404(conn, goodreads_id)
+        by_author = [
+            b for b in list_books(conn, BookFilters(author=book["author"]))
+            if b["goodreads_id"] != goodreads_id and b["author"] == book["author"]
+        ] if book.get("author") else []
+        also_tagged: list[dict] = []
+        if book["tags"]:
+            seen = {goodreads_id, *(b["goodreads_id"] for b in by_author)}
+            also_tagged = [
+                b for b in sort_books(list_books(conn, BookFilters(tag=book["tags"][0])), "added")
+                if b["goodreads_id"] not in seen
+            ]
         return templates.TemplateResponse(
             request,
             "book_detail.html",
             {
                 "book": book,
                 "all_tags": distinct_tags(conn),
+                "by_author": sort_books(by_author, "year")[:12],
+                "also_tagged": also_tagged[:12],
+                "shelf_label": SHELF_LABELS.get(book.get("exclusive_shelf") or "", book.get("reading_status") or ""),
                 **_nav_ctx(conn),
             },
         )
+
+    def _bulk_ids(conn: sqlite3.Connection, ids: list[str]) -> list[dict]:
+        books = [get_book(conn, i) for i in dict.fromkeys(ids)]
+        return [b for b in books if b is not None]
+
+    @app.post("/books/bulk/tags")
+    def bulk_tag(
+        conn: sqlite3.Connection = Depends(get_conn),
+        ids: list[str] = Form(...),
+        tag: str = Form(...),
+    ) -> dict:
+        """Add one tag to many books (the library's selection bar)."""
+        target = db.normalize_tags(tag)
+        if not target:
+            raise HTTPException(status_code=422, detail="tag must not be blank")
+        updated = 0
+        for book in _bulk_ids(conn, ids):
+            if target[0] not in book["tags"]:
+                db.update_local_fields(conn, book["goodreads_id"], {"tags_json": [*book["tags"], target[0]]})
+                updated += 1
+        return {"updated": updated, "tag": target[0]}
+
+    @app.post("/books/bulk/format")
+    def bulk_format(
+        conn: sqlite3.Connection = Depends(get_conn),
+        ids: list[str] = Form(...),
+        format: str = Form(""),
+    ) -> dict:
+        """Set (or clear) the owned format on many books at once."""
+        value = format.strip() or None
+        if value not in (None, *db.VALID_FORMATS):
+            raise HTTPException(status_code=422, detail=f"Unsupported format {format!r}")
+        books = _bulk_ids(conn, ids)
+        for book in books:
+            db.update_local_fields(conn, book["goodreads_id"], {"format": value})
+        return {"updated": len(books), "format": value}
 
     # The local-catalogue fields (format, loaned_to, local_notes, tags) are all
     # LOCAL_FIELDS, which sync never touches, so editing them is always safe —
     # db.update_local_fields enforces that boundary (including rejecting unknown
     # format values). Every field is edited inline and autosaves on change; each
     # endpoint below re-renders just that one field's fragment.
-    _EDIT_SCOPES = ("detail", "shelf", "table")
+    _EDIT_SCOPES = ("detail", "insp", "shelf", "table")
 
     def _scope(scope: str) -> str:
         # `scope` namespaces the element ids so a book can be edited in several

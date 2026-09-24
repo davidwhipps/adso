@@ -1,0 +1,30 @@
+{# Masonry cover grid. Each card carries its cover's aspect ratio (`book.ar`) so
+   adso.js can place it before the image loads; without JS the grid falls back
+   to CSS columns. A card links to the full book page, and adso.js turns a plain
+   click into "open in the book sidebar". Expects `lib`, `open_book`. #}
+{% from "_stars.html" import stars %}
+<div class="masonry" id="masonry">
+  {% for book in lib.books %}
+  {% set gid = book.goodreads_id %}
+  <a class="it {{ 'open' if open_book and open_book.goodreads_id == gid }}"
+     {% if gid %}href="/book/{{ gid }}" data-id="{{ gid }}"{% endif %}
+     data-i="{{ loop.index0 }}" data-ar="{{ '%.3f' | format(book.ar) }}"
+     aria-label="{{ book.title }}{% if book.author %} by {{ book.author }}{% endif %}">
+    <div class="in" style="--d: {{ [loop.index0, 30] | min * 22 }}ms">
+      <div class="cv" style="aspect-ratio: 1 / {{ '%.3f' | format(book.ar) }}">
+        <div class="fb"><span>{{ book.title }}</span><small>{{ book.author or "" }}</small></div>
+        {% if book.cover_url %}<img src="{{ book.cover_url }}" alt="" loading="lazy" decoding="async">{% endif %}
+        <div class="shade"></div>
+        {% if book.loaned_to %}<span class="tagpill">Loaned · {{ book.loaned_to }}</span>
+        {% elif book.exclusive_shelf == "currently-reading" %}<span class="tagpill hl">Reading</span>{% endif %}
+        {% if gid %}<span class="selbtn" role="button" tabindex="-1" data-sel>Select</span>{% endif %}
+        <div class="cap">
+          <div class="t">{{ book.title }}</div>
+          <div class="a"><span>{{ book.author or "" }}</span>{% if book.rating %}<span class="s">{{ "★" * book.rating }}</span>{% endif %}</div>
+        </div>
+      </div>
+      <div class="meta"><div class="t">{{ book.title }}</div><div class="a">{{ book.author or "" }}</div></div>
+    </div>
+  </a>
+  {% endfor %}
+</div>
