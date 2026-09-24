@@ -17,7 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Export Library**. Goodreads rejects headless browsers (HTTP 403), so Adso
   doesn't try to click it for you. An export downloaded *before* the last
   Goodreads sync is filed away but not synced, so an old file lying in Downloads
-  can't bring back outdated Goodreads values.
+  can't bring back outdated Goodreads values. An export byte-identical to the
+  one last synced is moved to the Trash instead of being synced and filed again.
 - **Always-on web UI on macOS** (`adso service install|status|restart|uninstall`):
   a per-user LaunchAgent keeps `adso serve` running at `http://127.0.0.1:8420`
   (starts at login, restarts on crash). The web UI now ships a favicon, an

@@ -15,6 +15,7 @@ goodreads.com/review/import. Everything after that click is automated:
 
 from __future__ import annotations
 
+import filecmp
 import shutil
 import sqlite3
 import subprocess
@@ -67,6 +68,46 @@ def last_sync_time(db_path: str | Path) -> datetime | None:
         return None
     # SQLite's CURRENT_TIMESTAMP is UTC.
     return datetime.fromisoformat(row[0]).replace(tzinfo=timezone.utc)
+
+
+def last_synced_export(db_path: str | Path) -> Path | None:
+    """The CSV behind the most recent Goodreads sync, if it's still on disk."""
+    if not Path(db_path).exists():
+        return None
+    conn = sqlite3.connect(f"file:{Path(db_path).resolve()}?mode=ro", uri=True)
+    try:
+        row = conn.execute(
+            "SELECT source_path FROM import_runs WHERE source = 'goodreads' "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    except sqlite3.OperationalError:  # no import_runs table yet
+        return None
+    finally:
+        conn.close()
+    if not row or not row[0]:
+        return None
+    path = Path(row[0])
+    return path if path.is_file() else None
+
+
+def is_duplicate(path: str | Path, previous: Path | None) -> bool:
+    """True if `path` is byte-for-byte the export the catalogue last synced from."""
+    return previous is not None and filecmp.cmp(path, previous, shallow=False)
+
+
+def trash(path: str | Path) -> Path | None:
+    """Move a file to the macOS Trash (recoverable). Returns None if there's no Trash."""
+    bin_dir = Path.home() / ".Trash"
+    if not bin_dir.is_dir():
+        return None
+    source = Path(path)
+    target = bin_dir / source.name
+    n = 2
+    while target.exists():
+        target = bin_dir / f"{source.stem} {n}{source.suffix}"
+        n += 1
+    shutil.move(str(source), target)
+    return target
 
 
 def is_stale(path: str | Path, last_sync: datetime | None) -> bool:

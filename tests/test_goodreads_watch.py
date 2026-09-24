@@ -97,9 +97,16 @@ class IngestTests(unittest.TestCase):
         self.downloads.mkdir()
         self.db_path = root / "lib" / "cat.sqlite"
         self.db_path.parent.mkdir()
-        notify = mock.patch.object(goodreads_watch, "notify")
-        self.notify = notify.start()
-        self.addCleanup(notify.stop)
+        self.archive_dir = self.db_path.parent / "exports" / "goodreads"
+        self.home = root / "home"
+        (self.home / ".Trash").mkdir(parents=True)
+        for patch in (
+            mock.patch.object(goodreads_watch, "notify"),
+            mock.patch.object(goodreads_watch.Path, "home", return_value=self.home),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.notify = goodreads_watch.notify
 
     def _ingest(self):
         out = io.StringIO()
@@ -141,7 +148,8 @@ class IngestTests(unittest.TestCase):
     def test_resync_backs_up_existing_catalogue_first(self):
         (self.downloads / "goodreads_library_export.csv").write_bytes(FIXTURE.read_bytes())
         self._ingest()
-        (self.downloads / "goodreads_library_export.csv").write_bytes(FIXTURE.read_bytes())
+        # A changed export (an identical one would be skipped as a duplicate).
+        (self.downloads / "goodreads_library_export.csv").write_bytes(FIXTURE.read_bytes() + b"\n")
         code, out = self._ingest()
         self.assertEqual(code, 0, out)
         self.assertEqual(len(list(self.db_path.parent.glob("cat.sqlite.bak-*"))), 1)
@@ -182,7 +190,7 @@ class IngestTests(unittest.TestCase):
         old.write_bytes(FIXTURE.read_bytes())
         self._age(old, seconds_ago=90 * 86400)
         new = self.downloads / "goodreads_library_export (1).csv"
-        new.write_bytes(FIXTURE.read_bytes())
+        new.write_bytes(FIXTURE.read_bytes() + b"\n")
         self._age(new, seconds_ago=-5)  # just downloaded
         code, out = self._ingest()
         self.assertEqual(code, 0, out)
@@ -198,6 +206,47 @@ class IngestTests(unittest.TestCase):
         code, out = self._ingest()
         self.assertEqual(code, 0, out)
         self.assertNotIn("Skipped", out)
+
+    def test_redownload_of_last_synced_export_goes_to_trash(self):
+        (self.downloads / "goodreads_library_export.csv").write_bytes(FIXTURE.read_bytes())
+        self._ingest()
+        again = self.downloads / "goodreads_library_export.csv"
+        again.write_bytes(FIXTURE.read_bytes())
+        self._age(again, seconds_ago=-5)  # downloaded after the last sync
+        self.notify.reset_mock()
+        code, out = self._ingest()
+        self.assertEqual(code, 0, out)
+        self.assertIn("identical", out)
+        self.assertEqual(list(self.downloads.iterdir()), [])
+        self.assertEqual(len(list((self.home / ".Trash").iterdir())), 1)
+        self.assertEqual(len(list(self.archive_dir.glob("*.csv"))), 1)
+        conn = sqlite3.connect(self.db_path)
+        self.assertEqual(conn.execute("select count(*) from import_runs").fetchone()[0], 1)
+        conn.close()
+        self.assertIn("unchanged", self.notify.call_args.args[0])
+
+    def test_changed_export_still_syncs(self):
+        (self.downloads / "goodreads_library_export.csv").write_bytes(FIXTURE.read_bytes())
+        self._ingest()
+        changed = self.downloads / "goodreads_library_export.csv"
+        changed.write_bytes(FIXTURE.read_bytes() + b"\n")
+        self._age(changed, seconds_ago=-5)
+        code, out = self._ingest()
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("identical", out)
+        conn = sqlite3.connect(self.db_path)
+        self.assertEqual(conn.execute("select count(*) from import_runs").fetchone()[0], 2)
+        conn.close()
+
+    def test_identical_to_a_failed_sync_is_not_skipped(self):
+        (self.downloads / "goodreads_library_export.csv").write_bytes(FIXTURE.read_bytes())
+        with mock.patch.object(cli, "_sync_goodreads", side_effect=AdsoError("boom")):
+            self._ingest()
+        again = self.downloads / "goodreads_library_export.csv"
+        again.write_bytes(FIXTURE.read_bytes())
+        code, out = self._ingest()
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("identical", out)
 
     def test_failed_sync_notifies_and_does_not_leave_file_to_retrigger(self):
         (self.downloads / "goodreads_library_export.csv").write_bytes(FIXTURE.read_bytes())
