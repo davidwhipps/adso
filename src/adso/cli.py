@@ -333,12 +333,27 @@ def _run_goodreads(args, cfg: ResolvedConfig) -> int:
                 f"the catalogue. Filed as {filed}; sync it by hand with "
                 f"`adso sync goodreads {filed}` if you really mean to."
             )
+        # A re-download of the export we last synced from changes nothing; trash
+        # it (recoverable) rather than filing an identical copy.
+        previous = goodreads_watch.last_synced_export(cfg.db_path)
+        duplicates = [p for p in fresh if goodreads_watch.is_duplicate(p, previous)]
+        fresh = [p for p in fresh if p not in duplicates]
+        for path in duplicates:
+            if goodreads_watch.trash(path):
+                print(f"Skipped {path.name}: identical to {previous.name}; moved it to the Trash.")
+            else:
+                filed = goodreads_watch.archive(path, archive_dir)
+                print(f"Skipped {path.name}: identical to {previous.name}; filed as {filed}.")
         if not fresh:
             if args.notify:
-                goodreads_watch.notify(
-                    f"Skipped {len(stale)} old Goodreads export(s), downloaded before your "
-                    "last sync. Nothing changed."
-                )
+                if duplicates:
+                    message = "Goodreads export unchanged since your last sync. Nothing to do."
+                else:
+                    message = (
+                        f"Skipped {len(stale)} old Goodreads export(s), downloaded before "
+                        "your last sync. Nothing changed."
+                    )
+                goodreads_watch.notify(message)
             return 0
         archived = [goodreads_watch.archive(path, archive_dir) for path in fresh]
         csv_path = archived[-1]  # newest
