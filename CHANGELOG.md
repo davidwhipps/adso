@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Redesigned library web UI.** One library page replaces the Catalogue and To Read
-  pages. A sidebar lists shelves (Library = everything except to-read), smart views
+  pages. A sidebar lists the whole library, shelves, smart views
   (Loaned out, Read but unrated, Recently added, Five stars, Untagged) and tags, each
   with the count clicking it would show, plus a row of tag buttons. Three views:
   a masonry cover grid at each cover's real shape (with a size slider and optional

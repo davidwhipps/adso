@@ -28,7 +28,7 @@ from ..catalogue import list_books, search_books
 from ..covers import image_size
 
 # Goodreads' raw exclusive-shelf values, in sidebar order. "Library" (no shelf
-# chosen) is everything except to-read, matching the old Catalogue page.
+# chosen) is the whole collection, to-read included.
 TO_READ_SHELF = "to-read"
 SHELVES: tuple[tuple[str, str], ...] = (
     ("currently-reading", "Currently reading"),
@@ -220,12 +220,8 @@ COVER_SHAPES = _CoverShapes()
 
 def _passes(book: dict[str, Any], p: LibraryParams, match_ids: set[str] | None, skip: str = "") -> bool:
     shelf = book.get("exclusive_shelf") or ""
-    if skip != "shelf":
-        if p.shelf and shelf != p.shelf:
-            return False
-        # "Library" (no shelf) keeps the old Catalogue meaning: not want-to-read.
-        if not p.shelf and shelf == TO_READ_SHELF:
-            return False
+    if skip != "shelf" and p.shelf and shelf != p.shelf:
+        return False
     if skip != "smart" and p.smart and not _SMART_TESTS[p.smart](book):
         return False
     if skip != "tag" and p.tag and p.tag not in book.get("tags", []):
@@ -290,7 +286,7 @@ def build_library(conn: sqlite3.Connection, p: LibraryParams, cover_root: Path) 
         wall=wall,
         match_ids={b["goodreads_id"] for b in books},
         total=len(everything),
-        # What "Library" (no shelf, so everything but to-read) would show.
+        # What "Library" (no shelf: the whole collection) would show.
         library_count=sum(1 for b in everything if _passes(b, replace(p, shelf=""), match_ids)),
         shelves=shelves,
         smart=smart,

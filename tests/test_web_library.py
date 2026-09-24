@@ -74,9 +74,9 @@ class LibraryPageTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def test_library_excludes_to_read_by_default(self) -> None:
+    def test_library_shows_the_whole_collection(self) -> None:
         titles = _titles(self.client.get("/").text)
-        self.assertEqual(titles, ["The Clockwork Herbarium", "A Winter Almanac", "Zebra Crossings"])
+        self.assertEqual(titles, ["The Clockwork Herbarium", "Unread Pile", "A Winter Almanac", "Zebra Crossings"])
 
     def test_to_read_shelf_and_old_url_redirect(self) -> None:
         self.assertEqual(_titles(self.client.get("/", params={"shelf": "to-read"}).text), ["Unread Pile"])
@@ -98,7 +98,7 @@ class LibraryPageTests(unittest.TestCase):
 
     def test_sort_by_author_uses_last_name_then_title(self) -> None:
         titles = _titles(self.client.get("/", params={"sort": "author"}).text)
-        self.assertEqual(titles, ["The Clockwork Herbarium", "A Winter Almanac", "Zebra Crossings"])
+        self.assertEqual(titles, ["The Clockwork Herbarium", "A Winter Almanac", "Unread Pile", "Zebra Crossings"])
         titles = _titles(self.client.get("/", params={"sort": "added"}).text)
         self.assertEqual(titles[0], "Zebra Crossings")
 
