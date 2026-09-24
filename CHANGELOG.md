@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Goodreads auto-sync on macOS** (`adso service install-sync|uninstall-sync`,
+  `adso goodreads ingest|open|remind`): a LaunchAgent watches `~/Downloads` (or
+  `--watch-dir`), and when a `goodreads_library_export*.csv` lands it backs up the
+  catalogue, files the CSV under `exports/goodreads/goodreads-YYYY-MM-DD.csv`, runs
+  the usual safe sync and posts a notification with the counts. A weekly reminder
+  (`--day`/`--hour`, or `--no-reminder`) prompts the one manual step, clicking
+  **Export Library**. Goodreads rejects headless browsers (HTTP 403), so Adso
+  doesn't try to click it for you. An export downloaded *before* the last
+  Goodreads sync is filed away but not synced, so an old file lying in Downloads
+  can't bring back outdated Goodreads values.
 - **Always-on web UI on macOS** (`adso service install|status|restart|uninstall`):
   a per-user LaunchAgent keeps `adso serve` running at `http://127.0.0.1:8420`
   (starts at login, restarts on crash). The web UI now ships a favicon, an
