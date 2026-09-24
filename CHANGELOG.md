@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Goodreads covers**: `fetch-covers` now tries the book's own public Goodreads page first (the `.xml` variant of the URL, which isn't behind Goodreads' bot check), then Goodreads search suggestions, accepting only an exact Goodreads ID match. Open Library and Apple Books remain as fallbacks. Goodreads' "no photo" placeholder is ignored. On a real 1,067-book library this found all 138 covers that were previously `not_found`. Run `adso fetch-covers --refresh` to replace earlier title-search covers with the exact edition's cover. Manual covers are still never touched.
 - **Goodreads auto-sync on macOS** (`adso service install-sync|uninstall-sync`,
   `adso goodreads ingest|open|remind`): a LaunchAgent watches `~/Downloads` (or
   `--watch-dir`), and when a `goodreads_library_export*.csv` lands it backs up the

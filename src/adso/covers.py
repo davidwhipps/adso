@@ -7,13 +7,22 @@ Goodreads-sourced field, so it deliberately stays out of the
 source_snapshots/sync_conflicts machinery.
 
 Source chain (first hit wins):
-    1. Open Library cover by ISBN-13 then ISBN-10.
-    2. Open Library Search by title + author -> cover id -> cover by id.
-    3. iTunes / Apple Books Search by title + author -> artwork.
+    1. Goodreads book page for the book's own Goodreads ID -> og:image.
+    2. Goodreads autocomplete (ISBN, then title/author) -> exact Book ID match.
+    3. Open Library cover by ISBN-13 then ISBN-10.
+    4. Open Library Search by title + author -> cover id -> cover by id.
+    5. iTunes / Apple Books Search by title + author -> artwork.
 
-Open Library is the primary source: it is the open, community source (in keeping
-with the local-first ethos), needs no API key, and is lenient about volume.
-iTunes is a no-key fallback that fills gaps Open Library lacks art for. Google
+Goodreads comes first because every book is keyed by its Goodreads ID, so it is
+the only source guaranteed to return the same edition's cover you see there.
+The regular book page sits behind an AWS WAF JavaScript challenge, but the
+``.xml`` variant of the same URL serves the full HTML page; that is an
+undocumented quirk, so autocomplete (a public JSON endpoint) backs it up, and
+only a result whose ``bookId`` equals ours is accepted. Both are plain, polite
+GETs against public pages for books in your own library — no sign-in.
+
+Open Library is the open, community fallback, needs no API key, and is lenient
+about volume. iTunes is a no-key fallback that fills gaps Open Library lacks art for. Google
 Books is deliberately not used — its keyless tier rate-limits (HTTP 429) almost
 immediately and its throttled connections can stall.
 
@@ -23,6 +32,7 @@ automatic fetch.
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -47,6 +57,14 @@ OPENLIBRARY_COVER_ISBN = "https://covers.openlibrary.org/b/isbn/{isbn}-L.jpg?def
 OPENLIBRARY_COVER_ID = "https://covers.openlibrary.org/b/id/{cover_id}-L.jpg?default=false"
 OPENLIBRARY_SEARCH = "https://openlibrary.org/search.json"
 ITUNES_SEARCH = "https://itunes.apple.com/search"
+
+# Goodreads URLs and markup live here so drift is a one-line fix.
+GOODREADS_BOOK_PAGE = "https://www.goodreads.com/book/show/{goodreads_id}.xml"
+GOODREADS_AUTOCOMPLETE = "https://www.goodreads.com/book/auto_complete"
+_OG_IMAGE = re.compile(r'<meta[^>]+property="og:image"[^>]+content="([^"]+)"')
+# Autocomplete thumbnails carry a size suffix (``123._SY75_.jpg``); dropping it
+# yields the full-size image.
+_GOODREADS_SIZE_SUFFIX = re.compile(r"\._S[XY]\d+_(?=\.\w+$)")
 
 # Magic-byte signatures -> file extension. Only these are accepted as covers.
 _IMAGE_SIGNATURES = (
@@ -112,6 +130,71 @@ def _openlibrary_search_cover_id(title: str, author: str) -> int | None:
     return cover_id if isinstance(cover_id, int) and cover_id > 0 else None
 
 
+def _goodreads_usable(url: str | None) -> bool:
+    """False for missing URLs and Goodreads' "no photo" placeholder art."""
+    return bool(url) and "nophoto" not in url  # type: ignore[operator]
+
+
+def _goodreads_page_image_url(goodreads_id: str) -> str | None:
+    """The og:image on the book's own Goodreads page (exact edition)."""
+    response = _request("get", GOODREADS_BOOK_PAGE.format(goodreads_id=goodreads_id))
+    if response is None or response.status_code != 200:
+        return None  # 202 = WAF challenge; treat as a miss and fall through
+    match = _OG_IMAGE.search(response.text or "")
+    url = match.group(1) if match else None
+    return url if _goodreads_usable(url) else None
+
+
+def _bare_title(title: str) -> str:
+    """Drop series/subtitle noise: "Red Dragon (Hannibal, #1)" -> "Red Dragon"."""
+    return re.split(r"[(:]", title, maxsplit=1)[0].strip()
+
+
+def _goodreads_search_image_url(goodreads_id: str, book: dict[str, Any]) -> str | None:
+    """Search Goodreads autocomplete, accepting only an exact Book ID match."""
+    title = _bare_title(str(book.get("title") or ""))
+    author = " ".join(str(book.get("author") or "").split())
+    queries = [q for q in (book.get("isbn13"), book.get("isbn10")) if q]
+    if title:
+        queries += [f"{title} {author}".strip(), title]
+    for query in dict.fromkeys(queries):  # de-duplicate, keep order
+        response = _request(
+            "get", GOODREADS_AUTOCOMPLETE, params={"format": "json", "q": query}
+        )
+        if response is None or response.status_code != 200:
+            continue
+        try:
+            results = response.json()
+        except ValueError:
+            continue
+        for result in results if isinstance(results, list) else []:
+            if str(result.get("bookId")) != str(goodreads_id):
+                continue
+            url = result.get("imageUrl")
+            if _goodreads_usable(url):
+                return _GOODREADS_SIZE_SUFFIX.sub("", url)
+            return None  # our edition has no Goodreads art; searching on won't help
+    return None
+
+
+def _goodreads_cover(book: dict[str, Any]) -> tuple[bytes, str, str, str] | None:
+    """Resolve the cover Goodreads shows for this exact edition, if any."""
+    goodreads_id = str(book.get("goodreads_id") or "").strip()
+    if not goodreads_id:
+        return None
+    for source, find_url in (
+        ("goodreads:page", lambda: _goodreads_page_image_url(goodreads_id)),
+        ("goodreads:search", lambda: _goodreads_search_image_url(goodreads_id, book)),
+    ):
+        url = find_url()
+        if url:
+            result = _download_image(url)
+            if result is not None:
+                data, ext = result
+                return data, source, url, ext
+    return None
+
+
 def _itunes_artwork_url(title: str, author: str) -> str | None:
     """Look up cover artwork for a title (+author) via the iTunes Search API.
 
@@ -145,9 +228,14 @@ def resolve_cover(book: dict[str, Any]) -> tuple[bytes, str, str, str] | None:
     Returns ``(image_bytes, source, source_url, ext)`` for the first source that
     yields a valid image, or ``None`` if no source has one.
     """
+    # 1-2. Goodreads, for the exact edition.
+    resolved = _goodreads_cover(book)
+    if resolved is not None:
+        return resolved
+
     isbns = [isbn for isbn in (book.get("isbn13"), book.get("isbn10")) if isbn]
 
-    # 1. Open Library cover by ISBN.
+    # 3. Open Library cover by ISBN.
     for isbn in isbns:
         url = OPENLIBRARY_COVER_ISBN.format(isbn=isbn)
         result = _download_image(url)
@@ -155,7 +243,7 @@ def resolve_cover(book: dict[str, Any]) -> tuple[bytes, str, str, str] | None:
             data, ext = result
             return data, "openlibrary:isbn", url, ext
 
-    # 2. Open Library Search by title + author -> cover id -> cover image.
+    # 4. Open Library Search by title + author -> cover id -> cover image.
     title = (book.get("title") or "").strip()
     author = (book.get("author") or "").strip()
     if title:
@@ -167,7 +255,7 @@ def resolve_cover(book: dict[str, Any]) -> tuple[bytes, str, str, str] | None:
                 data, ext = result
                 return data, "openlibrary:search", url, ext
 
-    # 3. iTunes / Apple Books Search by title + author.
+    # 5. iTunes / Apple Books Search by title + author.
     if title:
         artwork_url = _itunes_artwork_url(title, author)
         if artwork_url:
