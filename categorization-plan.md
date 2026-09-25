@@ -136,7 +136,26 @@ Each book goes through a pipeline of pluggable "suggesters". Each suggester retu
    - `book_relations` is left for phase 4. Series is in.
    - Category labels are not in the FTS index yet.
    - Review is list-then-decide (`adso review`, `adso review ID --accept/--as/--reject/--reopen`), matching `conflicts`/`resolve`, rather than an interactive walk.
-2. **Web and MCP**: the review page, book-page pills, genre tree sidebar, taxonomy page, MCP tools, and updated exports (CSV, JSON, Notion multi-select for Genre).
+2. **Web and MCP** (done). Delivered:
+   - Library sidebar: a genre tree, themes, and custom Goodreads shelves, plus series filtering.
+   - Book block: category chips showing where each came from, with add, remove and make-primary, a series line, and an "In the series" strip.
+   - Review: a Categories section with grouped cards.
+   - A `/taxonomy` Categories page.
+   - MCP: category fields and filters, plus `list_taxonomy`, `list_category_suggestions`, `suggest_categories` (new `assign` suggestion kind, queue-only) and `review_category_suggestion`.
+   - API filters and `/api/taxonomy`.
+   - CSV/JSON export columns.
+
+   Not done:
+   - The Notion export is unchanged: writing a Genre property would fail on databases that lack it. This needs an opt-in.
+   - Subjects are not sidebar facets yet.
+
+   Follow-ups from testing on the real library (same PR):
+   - Custom Goodreads shelves are not a sidebar taxonomy. They fold into genres (via mappings) and **tags**: an unmatched shelf is proposed as a tag rule (`category_rules.tag`), applied once per book (`tag_rule_applications`).
+   - Subject-only nonfiction genres on fiction become grouped `assign` questions.
+   - Seed revision 2 removes the "war", "military" and "juvenile fiction" aliases.
+   - Aliases can be removed.
+   - Pending proposals are revalidated on each run.
+   - Examples show the most recently added books.
 3. **AI suggester**: the `[ai]` optional extra with the `anthropic` SDK, batching, prompt caching, cost dry-run, and proposed-category approval.
 4. **Relationships and next reads**: `related_books`, the taste profile, `adso next`, the web panel, and insight views.
 

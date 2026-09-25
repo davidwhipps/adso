@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
+from .. import categorize as cat
 from .. import db
 from ..catalogue import list_books, search_books
 from ..covers import image_size
@@ -70,7 +71,10 @@ SORTS: tuple[tuple[str, str], ...] = (
 SORT_LABELS = dict(SORTS)
 VIEWS = ("grid", "table", "wall")
 # Parameters that make up a library URL, in a stable order for link building.
-URL_PARAMS = ("q", "shelf", "smart", "tag", "status", "format", "rating", "author", "sort", "view", "book")
+URL_PARAMS = (
+    "q", "shelf", "smart", "tag", "category", "gr_shelf", "series",
+    "status", "format", "rating", "author", "sort", "view", "book",
+)
 
 _ARTICLES = ("the ", "a ", "an ")
 
@@ -116,6 +120,9 @@ class LibraryParams:
     shelf: str = ""
     smart: str = ""
     tag: str = ""
+    category: str = ""  # category id; matches the category and everything beneath it
+    gr_shelf: str = ""  # any Goodreads shelf, not just the exclusive one
+    series: str = ""  # series name; lists it in reading order
     status: str = ""
     format: str = ""
     rating: int | None = None
@@ -132,6 +139,9 @@ class LibraryParams:
         p.shelf = p.shelf if p.shelf in SHELF_LABELS else ""
         p.smart = p.smart if p.smart in SMART_LABELS else ""
         p.tag = p.tag.strip().lower()
+        p.category = p.category.strip() if p.category.strip().isdigit() else ""
+        p.gr_shelf = p.gr_shelf.strip().lower()
+        p.series = " ".join(p.series.split())
         p.format = p.format if p.format in db.VALID_FORMATS else ""
         p.sort = p.sort if p.sort in SORT_LABELS else "title"
         p.view = p.view if p.view in VIEWS else "grid"
@@ -156,6 +166,7 @@ class Facet:
     count: int
     active: bool
     url: str
+    depth: int = 0
 
 
 @dataclass
@@ -169,12 +180,18 @@ class Library:
     shelves: list[Facet]
     smart: list[Facet]
     tags: list[Facet]
+    genres: list[Facet] = field(default_factory=list)
+    themes: list[Facet] = field(default_factory=list)
+    category_label: str = ""
     chips: list[tuple[str, str]] = field(default_factory=list)  # (label, remove-url)
 
     @property
     def heading(self) -> str:
         p = self.params
-        parts = [SMART_LABELS.get(p.smart, ""), SHELF_LABELS.get(p.shelf, ""), f"#{p.tag}" if p.tag else ""]
+        parts = [
+            SMART_LABELS.get(p.smart, ""), SHELF_LABELS.get(p.shelf, ""), self.category_label,
+            p.series, f"#{p.tag}" if p.tag else "",
+        ]
         parts.append(f"“{p.q}”" if p.q else "")
         parts = [x for x in parts if x]
         return " · ".join(parts) if parts else "The Library"
@@ -226,6 +243,12 @@ def _passes(book: dict[str, Any], p: LibraryParams, match_ids: set[str] | None, 
         return False
     if skip != "tag" and p.tag and p.tag not in book.get("tags", []):
         return False
+    if skip != "category" and p.category and int(p.category) not in book.get("_cats", ()):
+        return False
+    if skip != "gr_shelf" and p.gr_shelf and p.gr_shelf not in book.get("shelves", []):
+        return False
+    if p.series and ((book.get("series") or {}).get("name") or "").casefold() != p.series.casefold():
+        return False
     if p.status and book.get("reading_status") != p.status:
         return False
     if p.format and book.get("format") != p.format:
@@ -244,11 +267,28 @@ def _passes(book: dict[str, Any], p: LibraryParams, match_ids: set[str] | None, 
 def build_library(conn: sqlite3.Connection, p: LibraryParams, cover_root: Path) -> Library:
     """Everything the catalogue page renders for ``p``."""
     everything = list_books(conn)
+    taxonomy = cat.Taxonomy(conn)
+    assignments = cat.book_category_map(conn)
+    series = cat.book_series_map(conn)
     for book in everything:
         book["ar"] = COVER_SHAPES.ratio(cover_root, book.get("cover_path"))
+        # Each book's categories plus all their ancestors, so a filter on a
+        # parent ("Speculative Fiction") includes its subcategories.
+        rolled: set[int] = set()
+        for category_id in assignments.get(book["id"], {}):
+            rolled.update(node.id for node in taxonomy.lineage(category_id))
+        book["_cats"] = rolled
+        book["series"] = series.get(book["id"])
     match_ids = {b["goodreads_id"] for b in search_books(conn, p.q)} if p.q else None
+    if p.category and int(p.category) not in taxonomy.by_id:
+        p = replace(p, category="")
 
-    books = sort_books([b for b in everything if _passes(b, p, match_ids)], p.sort)
+    books = [b for b in everything if _passes(b, p, match_ids)]
+    if p.series:
+        # A series reads in order; books without a position go last.
+        books = sorted(sort_books(books, "title"), key=lambda b: (b["series"] or {}).get("position") or 1e9)
+    else:
+        books = sort_books(books, p.sort)
 
     def count(skip: str, test: Callable[[dict[str, Any]], bool]) -> int:
         return sum(1 for b in everything if test(b) and _passes(b, p, match_ids, skip))
@@ -269,7 +309,22 @@ def build_library(conn: sqlite3.Connection, p: LibraryParams, cover_root: Path) 
         for t, _ in sorted(tag_totals.items(), key=lambda kv: (-kv[1], kv[0]))
     ]
 
+    def category_facets(facet: str) -> list[Facet]:
+        out = []
+        for node in next(f for f in cat.taxonomy_tree(conn) if f["facet"] == facet)["categories"]:
+            n = count("category", lambda b, i=node["id"]: i in b["_cats"])
+            active = p.category == str(node["id"])
+            if n or active:
+                out.append(Facet(str(node["id"]), node["label"], n, active,
+                                 p.query(category="" if active else str(node["id"]), book=""), node["depth"]))
+        return out
+
     chips: list[tuple[str, str]] = []
+    category_label = taxonomy.path(int(p.category)) if p.category else ""
+    if p.series:
+        chips.append((f"Series: {p.series}", p.query(series="")))
+    if p.gr_shelf:
+        chips.append((f"Goodreads shelf: {p.gr_shelf}", p.query(gr_shelf="")))
     if p.status:
         chips.append((f"Status: {p.status}", p.query(status="")))
     if p.format:
@@ -291,5 +346,8 @@ def build_library(conn: sqlite3.Connection, p: LibraryParams, cover_root: Path) 
         shelves=shelves,
         smart=smart,
         tags=tags,
+        genres=category_facets("genre"),
+        themes=category_facets("theme"),
+        category_label=category_label.split(" > ")[-1] if category_label else "",
         chips=chips,
     )

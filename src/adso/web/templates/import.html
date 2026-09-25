@@ -7,6 +7,11 @@
   Your local catalogue fields are protected — anything Goodreads changed that you also changed locally becomes a
   conflict to review rather than an overwrite.
 </p>
+<p class="mb-6 text-sm text-muted-foreground">
+  Your Goodreads shelves are how you organised books there. Adso keeps them with each book and uses them —
+  with the subjects Open Library lists — to suggest <strong>genres</strong> and <strong>tags</strong> for you to
+  review. Once you accept a shelf's suggestion, new books on that shelf are sorted the same way on every import.
+</p>
 
 {% if summary %}
 <div class="card mb-6">
@@ -26,8 +31,12 @@
     {% if metadata %}
     <p class="mt-1 text-sm text-muted-foreground">Metadata: {{ metadata.fetched }} fetched, {{ metadata.not_found }} not found{% if metadata.errors %}, {{ metadata.errors }} errors{% endif %}{% if metadata.isbn_backfilled %} · {{ metadata.isbn_backfilled }} ISBN{{ "" if metadata.isbn_backfilled == 1 else "s" }} backfilled{% endif %}.</p>
     {% endif %}
+    {% if categories %}
+    <p class="mt-1 text-sm text-muted-foreground">Categories: {{ categories.assigned }} added by your rules{% if categories.tagged %}, {{ categories.tagged }} tag{{ "" if categories.tagged == 1 else "s" }} from your shelves{% endif %}{% if categories.pending %} · {{ categories.pending }} suggestion{{ "" if categories.pending == 1 else "s" }} from your shelves and subjects to review{% endif %}.</p>
+    {% endif %}
     <div class="mt-4 flex flex-wrap gap-3 text-sm">
       <a href="/" class="hover:underline">View catalogue →</a>
+      {% if categories and categories.pending %}<a href="/review#categories" class="font-medium hover:underline">Review category suggestions →</a>{% endif %}
       <a href="/activity" class="hover:underline">View activity →</a>
       {% if summary.conflicts %}<a href="/conflicts" class="font-medium hover:underline">Review {{ summary.conflicts }} conflict{{ "" if summary.conflicts == 1 else "s" }} →</a>{% endif %}
     </div>

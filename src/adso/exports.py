@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 from . import db
+from .categorize import attach_categories, format_position
 
 EXPORT_FIELDS = [
     "goodreads_id",
@@ -28,15 +29,22 @@ EXPORT_FIELDS = [
     "subjects",
     "format",
     "tags",
+    "primary_genre",
+    "categories",
+    "series",
+    "series_position",
     "loaned_to",
     "local_notes",
 ]
 
 
+def _catalogue_rows(conn) -> list[dict]:
+    return attach_categories(conn, [db.row_to_catalogue_dict(row) for row in db.iter_books(conn)])
+
+
 def catalogue_json_string(conn) -> str:
     """Serialize the whole catalogue to a JSON string (the portable export shape)."""
-    rows = [db.row_to_catalogue_dict(row) for row in db.iter_books(conn)]
-    return json.dumps(rows, indent=2, sort_keys=True)
+    return json.dumps(_catalogue_rows(conn), indent=2, sort_keys=True)
 
 
 def catalogue_csv_string(conn) -> str:
@@ -44,13 +52,19 @@ def catalogue_csv_string(conn) -> str:
     buffer = io.StringIO()
     writer = csv.DictWriter(buffer, fieldnames=EXPORT_FIELDS)
     writer.writeheader()
-    for row in db.iter_books(conn):
-        data = db.row_to_catalogue_dict(row)
+    for data in _catalogue_rows(conn):
         data["shelves"] = ", ".join(data["shelves"])
         data["tags"] = ", ".join(data["tags"])
         # description deliberately stays out of the CSV (multi-paragraph text
         # wrecks spreadsheets); the JSON export carries full fidelity.
         data["subjects"] = ", ".join(data["subjects"])
+        # "Genre: Speculative Fiction > Fantasy; Theme: Found family"
+        data["categories"] = "; ".join(
+            f"{facet.capitalize()}: {path}" for facet, paths in data["categories"].items() for path in paths
+        )
+        series = data["series"] or {}
+        data["series"] = series.get("name")
+        data["series_position"] = format_position(series.get("position")).lstrip("#") if series else None
         writer.writerow({field: data.get(field) for field in EXPORT_FIELDS})
     return buffer.getvalue()
 

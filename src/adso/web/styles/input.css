@@ -442,6 +442,47 @@ a.chipsm:hover { background: var(--hl); color: var(--hl-ink); }
 .strip .s-it:hover .cv { transform: translateY(-3px); box-shadow: var(--lift); }
 .strip .t { margin-top: 8px; font: 600 13px var(--serif); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
+/* ------------------------------------------------------- categories */
+/* Sidebar: genre tree indentation and the "Edit" link beside the heading. */
+.nav.sub { padding-left: calc(11px + var(--depth, 0) * 14px); font-size: 13.5px; }
+.side h5 .side-link { margin-left: auto; color: var(--faint); text-transform: none; letter-spacing: 0; }
+.side h5 .side-link:hover { color: var(--foreground); }
+
+/* A book's categories: facet rows of chips, each with where it came from. */
+.cats { display: grid; gap: 10px; }
+.cat-row { display: grid; gap: 6px; justify-items: start; }
+.cat-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.catchip { display: inline-flex; align-items: center; gap: 2px; height: 28px; padding: 0 4px 0 11px; border-radius: 999px; background: var(--fill); font-size: 13px; color: var(--fg-2); }
+a.catchip, .catchip.primary:not(:has(button)) { padding-right: 11px; }
+.catchip a:hover { text-decoration: underline; }
+.catchip.primary { background: var(--hl); color: var(--hl-ink); font-weight: 500; }
+.catchip.src-derived { font-style: italic; }
+.catchip.src-user { box-shadow: inset 0 0 0 1px var(--line); }
+.catchip button { display: inline-flex; width: 20px; height: 20px; align-items: center; justify-content: center; border-radius: 999px; opacity: 0.45; font-size: 12px; }
+.catchip button:hover { opacity: 1; background: var(--surface); }
+.cat-none { font: italic 15px var(--ital); color: var(--muted-foreground); }
+.cat-err { font-size: 13px; color: var(--destructive); }
+
+/* Review cards and the Categories page. */
+.catcard { gap: 0; padding: 18px 20px; }
+.catcard > * { padding-inline: 0; }
+.catsrc { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 9px; border-radius: 999px; background: var(--fill); font-size: 12.5px; }
+.catsrc button { opacity: 0.45; }
+.catsrc button:hover { opacity: 1; }
+.taxtree { display: grid; gap: 2px; }
+.taxtree > li { padding-left: calc(var(--depth, 0) * 22px); }
+.taxnode > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; padding: 7px 12px; border-radius: 11px; cursor: pointer; list-style: none; }
+.taxnode > summary::-webkit-details-marker { display: none; }
+.taxnode > summary:hover, .taxnode[open] > summary { background: var(--fill); }
+.taxlabel { font-weight: 500; }
+.taxcount { font: 12px var(--mono); color: var(--muted-foreground); }
+a.taxcount:hover { color: var(--foreground); text-decoration: underline; }
+.taxcount.zero { color: var(--faint); }
+.taxalias { font: italic 14px var(--ital); color: var(--muted-foreground); }
+.taxactions { display: flex; flex-wrap: wrap; gap: 10px 14px; padding: 10px 12px 14px; }
+.taxaliases { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 12px 0; }
+.catcard .catbooks { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+
 /* -------------------------------------------------------- floating */
 .bulk { position: fixed; left: 50%; bottom: 26px; z-index: 40; display: flex; align-items: center; gap: 4px; padding: 6px 6px 6px 8px; border-radius: 999px; background: var(--ink); color: var(--ink-fg); box-shadow: var(--pop); transform: translate(-50%, 140%); opacity: 0; pointer-events: none; transition: transform 0.5s var(--out), opacity 0.3s var(--std); font-size: 13.5px; white-space: nowrap; }
 .bulk.show { transform: translate(-50%, 0); opacity: 1; pointer-events: auto; }

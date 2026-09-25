@@ -1,12 +1,14 @@
 {# Local-catalogue block on the book page: every field is always live and
    autosaves on change — no edit/save toggle. The same field partials power the
    library's book sidebar (scope "insp") and the quick-edit popover (see
-   _local_panel.html); only this container differs. Expects `book`, `all_tags`. #}
+   _local_panel.html); only this container differs. Expects `book`, `all_tags`,
+   and for the category block `bc` and `choices`. #}
 {% set scope = "detail" %}
 <section class="localcard">
   <h2 class="flabel">Local catalogue</h2>
   <p class="localnote">Local only — yours, never synced to Goodreads. Changes save as you make them.</p>
   <div class="b-fields">
+    {% include "_book_categories.html" %}
     <div class="grid gap-1.5 text-sm">
       <span class="flabel">Tags</span>
       {% include "_local_tags.html" %}

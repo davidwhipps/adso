@@ -106,7 +106,7 @@ SEED: dict[str, tuple[_Node, ...]] = {
         (
             "History",
             ("world history",),
-            (("Military History", ("war", "military", "ww2", "wwii", "world war ii", "ww1", "wwi"), ()),),
+            (("Military History", ("ww2", "wwii", "world war ii", "ww1", "wwi"), ()),),
         ),
         (
             "Biography & Memoir",
@@ -138,7 +138,7 @@ SEED: dict[str, tuple[_Node, ...]] = {
         ("Young Adult", ("ya", "young adult fiction", "teen"), ()),
         (
             "Children's",
-            ("children", "childrens books", "juvenile fiction", "middle grade", "kids"),
+            ("children", "childrens books", "middle grade", "kids"),
             (),
         ),
     ),
@@ -146,6 +146,71 @@ SEED: dict[str, tuple[_Node, ...]] = {
     # They start empty and grow from accepted shelf mappings and user edits.
     "theme": (),
 }
+
+
+# Changes to the seed after catalogues were created with it. Seeding happens
+# once, so each revision is replayed on older catalogues by upgrade_seed:
+# (facet, label) pairs whose aliases to add or remove. A category the user
+# renamed or deleted is simply skipped.
+SEED_REVISION = 2
+_REVISIONS: dict[int, dict[str, tuple[tuple[str, str, str], ...]]] = {
+    2: {
+        # Over-broad Open Library subjects: "war" and "military" tag war
+        # novels; "juvenile fiction" tags classics with children's editions.
+        "remove": (
+            ("genre", "Military History", "war"),
+            ("genre", "Military History", "military"),
+            ("audience", "Children's", "juvenile fiction"),
+        ),
+        "add": (
+            ("genre", "Literary Fiction", "lit fic"),
+            ("genre", "Literary Fiction", "litfic"),
+            ("genre", "Mystery & Crime", "whodunnit"),
+            ("genre", "Science", "popsci"),
+            ("genre", "Science", "pop sci"),
+            ("genre", "Military History", "ww2"),
+            ("genre", "Military History", "wwii"),
+            ("genre", "Military History", "world war ii"),
+            ("genre", "Military History", "ww1"),
+            ("genre", "Military History", "wwi"),
+            ("genre", "Science Fiction", "hard sf"),
+            ("genre", "Science Fiction", "hard science fiction"),
+        ),
+    },
+}
+
+
+def upgrade_seed(conn: sqlite3.Connection) -> list[str]:
+    """Replay seed revisions newer than this catalogue's. Returns changed aliases."""
+    row = conn.execute("SELECT value FROM adso_meta WHERE key = 'taxonomy_seed_rev'").fetchone()
+    current = int(row[0]) if row else 1
+    removed: list[str] = []
+    for revision in sorted(r for r in _REVISIONS if r > current):
+        changes = _REVISIONS[revision]
+        for facet, label, alias in changes.get("remove", ()):
+            cur = conn.execute(
+                """
+                DELETE FROM category_aliases WHERE alias = ? AND category_id IN
+                    (SELECT id FROM categories WHERE facet = ? AND label = ?)
+                """,
+                (alias, facet, label),
+            )
+            if cur.rowcount:
+                removed.append(alias)
+        for facet, label, alias in changes.get("add", ()):
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO category_aliases (category_id, alias)
+                SELECT id, ? FROM categories WHERE facet = ? AND label = ?
+                """,
+                (alias, facet, label),
+            )
+    if current < SEED_REVISION:
+        conn.execute(
+            "INSERT OR REPLACE INTO adso_meta (key, value) VALUES ('taxonomy_seed_rev', ?)",
+            (str(SEED_REVISION),),
+        )
+    return removed
 
 
 def slugify(label: str) -> str:
@@ -160,6 +225,7 @@ def slugify(label: str) -> str:
 def seed_taxonomy(conn: sqlite3.Connection) -> bool:
     """Write the default taxonomy once per catalogue. Returns True if it seeded."""
     if conn.execute("SELECT 1 FROM adso_meta WHERE key = 'taxonomy_seeded'").fetchone():
+        upgrade_seed(conn)
         return False
     # A catalogue that somehow already has categories (e.g. hand-built) is
     # treated as seeded rather than having defaults mixed into it.
@@ -169,6 +235,10 @@ def seed_taxonomy(conn: sqlite3.Connection) -> bool:
                 _insert_node(conn, facet, node, parent_id=None, position=position)
     conn.execute(
         "INSERT OR REPLACE INTO adso_meta (key, value) VALUES ('taxonomy_seeded', '1')"
+    )
+    # The data above is already the latest revision.
+    conn.execute(
+        "INSERT OR REPLACE INTO adso_meta (key, value) VALUES ('taxonomy_seed_rev', ?)", (str(SEED_REVISION),)
     )
     return True
 

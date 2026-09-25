@@ -88,6 +88,10 @@ approval_mode = "approve"
 approval_mode = "approve"
 [mcp_servers.adso.tools.set_loaned_tool]
 approval_mode = "approve"
+[mcp_servers.adso.tools.suggest_categories_tool]
+approval_mode = "approve"
+[mcp_servers.adso.tools.review_category_suggestion_tool]
+approval_mode = "approve"
 ```
 
 Then **restart the ChatGPT app** (or start a fresh `codex` session) so it reloads
@@ -115,9 +119,13 @@ Restart Claude Desktop to pick it up.
 
 ## What the agent can (and can't) do
 
-**Eight tools.** Four reads — search the catalogue, fetch a book, summarise your
-library, list your shelves/tags/formats — and four curated writes: add tags,
-remove tags, set a book's owned format, and record a loan.
+**Twelve tools.** Six reads — search the catalogue (by shelf, tag, format,
+rating, author, category, Goodreads shelf or series), fetch a book, summarise
+your library, list the filter vocabulary, show your category tree, and list the
+open categorisation suggestions — and six curated writes: add tags, remove tags,
+set a book's owned format, record a loan, **suggest categories** for a book, and
+**decide a categorisation suggestion** when you ask it to. Every book the agent
+sees carries its primary genre, categories and series.
 
 The guardrails matter as much as the tools:
 
@@ -129,6 +137,11 @@ The guardrails matter as much as the tools:
 - **Writes touch only your local fields** (tags, format, loaned-to) — the ones
   sync never overwrites. Imports, sync, conflict resolution, and duplicate merges
   are all off-limits.
+- **Categories are proposals, never edits.** `suggest_categories` only adds
+  cards to your review queue (`adso review` or the web Review page), labelled as
+  coming from the agent with its reason; nothing is assigned until you accept.
+  Rejected proposals aren't raised again. `review_category_suggestion` is for
+  when you explicitly ask the agent to accept or reject one for you.
 - **You approve every action.** MCP clients prompt before running a tool; the
   `approval_mode = "approve"` entries above make the write tools ask first, and
   the canonical SQLite catalogue always stays the source of truth.

@@ -1,0 +1,84 @@
+{# One categorisation review card. Kinds:
+   - map: a shelf/subject/tag (or several pointing at the same category) ->
+     category; accepting creates rules that also apply after every sync.
+   - assign: a genre for particular books: Adso's "Open Library calls these
+     novels History" questions (grouped per genre), or an agent's proposal.
+   - primary: which of a book's genres leads.
+   Every button swaps this card in place. Expects `card`, `choices`. #}
+{% set sid = card.id %}
+{% set target = "#catcard-" ~ sid %}
+<div id="catcard-{{ sid }}" class="card catcard">
+  {% if card.kind == "map" %}
+  <header class="flex flex-wrap items-baseline justify-between gap-2">
+    <h3 class="font-medium">{{ card.target }}</h3>
+    <span class="text-sm text-muted-foreground">{{ card.book_count }} book{{ "" if card.book_count == 1 else "s" }} · {{ (card.confidence * 100) | int }}%</span>
+  </header>
+  <div class="mt-2 flex flex-wrap items-center gap-1.5 text-sm">
+    <span class="text-muted-foreground">from</span>
+    {% for m in card.members %}
+    <span class="catsrc">
+      {{ m.match_kind }} “{{ m.match_value }}”{% if card.members | length > 1 %} <span class="text-muted-foreground">{{ m.book_count }}</span>
+      <button type="button" title="Reject just this source" aria-label="Reject {{ m.match_kind }} {{ m.match_value }} only"
+              hx-post="/categories/suggestions/{{ m.id }}/reject" hx-vals='{"only": "1"}'
+              hx-target="{{ target }}" hx-swap="outerHTML">×</button>{% endif %}
+    </span>
+    {% endfor %}
+  </div>
+  {% if card.evidence %}<p class="mt-2 text-sm text-muted-foreground">{{ card.evidence }}</p>{% endif %}
+  <div class="mt-3 flex flex-wrap items-center gap-2">
+    <button class="btn-sm" hx-post="/categories/suggestions/{{ sid }}/accept" hx-target="{{ target }}" hx-swap="outerHTML">Accept</button>
+    <button class="btn-sm-outline" hx-post="/categories/suggestions/{{ sid }}/reject" hx-target="{{ target }}" hx-swap="outerHTML">Reject</button>
+    <form class="flex items-center gap-2" hx-post="/categories/suggestions/{{ sid }}/accept" hx-target="{{ target }}" hx-swap="outerHTML">
+      <select name="as_category" class="select text-sm" aria-label="Map to another category">
+        <option value="">Map to another category…</option>
+        {% for c in choices %}<option value="{{ c.ref }}">{{ c.display }}</option>{% endfor %}
+      </select>
+      <button class="btn-sm-outline" type="submit">Accept as</button>
+    </form>
+  </div>
+
+  {% elif card.kind == "assign" %}
+  {% set n = card.members | length %}
+  <header class="flex flex-wrap items-baseline justify-between gap-2">
+    <h3 class="font-medium">{{ card.target }}?</h3>
+    <span class="text-sm text-muted-foreground">
+      {{ n }} book{{ "" if n == 1 else "s" }}{% if card.proposed_by and card.proposed_by != "adso" %} · suggested by {{ card.proposed_by }}{% endif %}
+    </span>
+  </header>
+  {% if card.proposed_by == "adso" %}
+  <p class="mt-2 text-sm text-muted-foreground">
+    Open Library files {{ "this novel" if n == 1 else "these novels" }} under “{{ card.match_value }}”.
+    Accept to add the genre anyway, or reject to leave {{ "it" if n == 1 else "them" }} out.
+  </p>
+  {% elif card.evidence %}
+  <p class="mt-2 text-sm text-muted-foreground">“{{ card.evidence }}”</p>
+  {% endif %}
+  <div class="catbooks">
+    {% for m in card.members %}
+    <span class="catsrc">
+      <a class="hover:underline" href="/book/{{ m.goodreads_id }}">{{ m.subject.split(" — ")[0] }}</a>
+      {% if n > 1 %}<button type="button" title="Leave this one out" aria-label="Reject for {{ m.subject }}"
+              hx-post="/categories/suggestions/{{ m.id }}/reject" hx-vals='{"only": "1"}'
+              hx-target="{{ target }}" hx-swap="outerHTML">×</button>{% endif %}
+    </span>
+    {% endfor %}
+  </div>
+  <div class="mt-3 flex flex-wrap gap-2">
+    <button class="btn-sm" hx-post="/categories/suggestions/{{ sid }}/accept" hx-target="{{ target }}" hx-swap="outerHTML">Accept{% if n > 1 %} all{% endif %}</button>
+    <button class="btn-sm-outline" hx-post="/categories/suggestions/{{ sid }}/reject" hx-target="{{ target }}" hx-swap="outerHTML">Reject{% if n > 1 %} all{% endif %}</button>
+  </div>
+
+  {% else %}
+  <header>
+    <h3 class="font-medium"><a class="hover:underline" href="/book/{{ card.goodreads_id }}">{{ card.subject }}</a></h3>
+    <p class="text-sm text-muted-foreground">Its genres don't share a parent. Which one leads?</p>
+  </header>
+  <div class="mt-3 flex flex-wrap gap-2">
+    {% for option in card.options %}
+    <button class="{{ 'btn-sm' if option.id == card.category_id else 'btn-sm-outline' }}"
+            hx-post="/categories/suggestions/{{ sid }}/accept" hx-vals='{"as_category": {{ option.ref | tojson }}}'
+            hx-target="{{ target }}" hx-swap="outerHTML">{{ option.path }}</button>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>

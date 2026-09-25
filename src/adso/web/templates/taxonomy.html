@@ -1,0 +1,149 @@
+{% extends "base.html" %}
+{% block title %}Adso · Categories{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-semibold tracking-tight">Categories</h1>
+<p class="mb-6 text-muted-foreground">
+  Your vocabulary for organising the library. Genres form a tree: filtering by a genre
+  includes everything beneath it, and each book has one primary genre. Rename, move and
+  merge freely — old names keep matching your Goodreads shelves.
+  Suggestions to decide are on <a class="underline" href="/review#categories">Review</a>.
+</p>
+
+{% if msg %}<div class="alert mb-6" role="status"><section>{{ msg }}</section></div>{% endif %}
+{% if error %}<div class="alert-destructive mb-6" role="alert"><section>{{ error }}</section></div>{% endif %}
+
+<div class="card mb-8">
+  <header><h2>Add a category</h2></header>
+  <section class="pt-2">
+    <form method="post" action="/taxonomy/add" class="flex flex-wrap items-end gap-2">
+      <label class="grid gap-1 text-sm">Facet
+        <select name="facet" class="select">
+          {% for key, label in facet_labels.items() %}<option value="{{ key }}">{{ label }}</option>{% endfor %}
+        </select>
+      </label>
+      <label class="grid gap-1 text-sm">Under (optional)
+        <select name="parent" class="select">
+          <option value="">— top level —</option>
+          {% for c in choices %}<option value="{{ c.ref }}">{{ c.display }}</option>{% endfor %}
+        </select>
+      </label>
+      <label class="grid gap-1 text-sm">Name
+        <input type="text" name="name" class="input h-9 w-56" required placeholder="e.g. Grimdark or Found family">
+      </label>
+      <button class="btn-sm h-9" type="submit">Add</button>
+    </form>
+    <p class="mt-2 text-sm text-muted-foreground">A subcategory takes its parent's facet.</p>
+  </section>
+</div>
+
+{% for facet in facets %}
+<section class="mb-10">
+  <h2 class="mb-3 text-xl font-semibold tracking-tight">{{ facet.label }}</h2>
+  {% if not facet.categories %}
+  <p class="text-muted-foreground">None yet{% if facet.facet == "theme" %} — themes come from your own shelves as you accept them, or add one above{% endif %}.</p>
+  {% endif %}
+  <ul class="taxtree">
+    {% for node in facet.categories %}
+    <li id="cat-{{ node.id }}" style="--depth: {{ node.depth }}">
+      <details class="taxnode">
+        <summary>
+          <span class="taxlabel">{{ node.label }}</span>
+          {% if node.total %}<a class="taxcount" href="/?category={{ node.id }}">{{ node.total }} book{{ "" if node.total == 1 else "s" }}</a>{% else %}<span class="taxcount zero">no books</span>{% endif %}
+          {% if node.aliases %}<span class="taxalias">also: {{ node.aliases | join(", ") }}</span>{% endif %}
+        </summary>
+        {% if node.aliases %}
+        <div class="taxaliases">
+          <span class="text-sm text-muted-foreground">Also matches</span>
+          {% for alias in node.aliases %}
+          <form method="post" action="/taxonomy/{{ node.id }}/unalias" class="inline">
+            <input type="hidden" name="alias" value="{{ alias }}">
+            <span class="catsrc">{{ alias }}<button type="submit" title="Stop “{{ alias }}” matching {{ node.label }}" aria-label="Remove alias {{ alias }}">×</button></span>
+          </form>
+          {% endfor %}
+        </div>
+        {% endif %}
+        <div class="taxactions">
+          <form method="post" action="/taxonomy/{{ node.id }}/rename" class="flex items-center gap-2">
+            <input type="text" name="label" class="input h-8 w-48 text-sm" value="{{ node.label }}" aria-label="New name" required>
+            <button class="btn-sm-outline" type="submit">Rename</button>
+          </form>
+          <form method="post" action="/taxonomy/{{ node.id }}/move" class="flex items-center gap-2">
+            <select name="parent" class="select text-sm" aria-label="New parent">
+              <option value="">— top level —</option>
+              {% for c in choices if c.facet == facet.facet and c.id != node.id %}<option value="{{ c.ref }}">{{ c.path }}</option>{% endfor %}
+            </select>
+            <button class="btn-sm-outline" type="submit">Move</button>
+          </form>
+          <form method="post" action="/taxonomy/{{ node.id }}/merge" class="flex items-center gap-2"
+                onsubmit="return confirm({{ ('Merge ' ~ node.label ~ ' into the chosen category? ' ~ node.books ~ ' book assignment(s), ' ~ node.rules ~ ' rule(s) and ' ~ node.children ~ ' subcategor(y/ies) move across; its name is kept as an alias.') | tojson | forceescape }})">
+            <select name="target" class="select text-sm" aria-label="Merge into" required>
+              <option value="">Merge into…</option>
+              {% for c in choices if c.facet == facet.facet and c.id != node.id %}<option value="{{ c.ref }}">{{ c.path }}</option>{% endfor %}
+            </select>
+            <button class="btn-sm-outline" type="submit">Merge</button>
+          </form>
+          <form method="post" action="/taxonomy/{{ node.id }}/alias" class="flex items-center gap-2">
+            <input type="text" name="alias" class="input h-8 w-40 text-sm" placeholder="another name" aria-label="Add an alias" required>
+            <button class="btn-sm-outline" type="submit">Add alias</button>
+          </form>
+          <form method="post" action="/taxonomy/{{ node.id }}/delete"
+                onsubmit="return confirm({{ ('Delete ' ~ node.label ~ '? It comes off ' ~ node.books ~ ' book(s), its ' ~ node.rules ~ ' rule(s) go, and its ' ~ node.children ~ ' subcategor(y/ies) move up a level.') | tojson | forceescape }})">
+            <button class="btn-sm-destructive" type="submit">Delete</button>
+          </form>
+        </div>
+      </details>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endfor %}
+
+<section id="rules" class="mb-10">
+  <h2 class="mb-1 text-xl font-semibold tracking-tight">Mapping rules</h2>
+  <p class="mb-4 text-muted-foreground">
+    Each rule puts every book with that Goodreads shelf, Open Library subject or tag into a
+    category — now and after every sync. Removing a rule takes its categories off those books
+    (anything you set by hand stays).
+  </p>
+  {% if rules %}
+  <div class="overflow-x-auto">
+    <table class="table text-sm">
+      <thead><tr><th>When a book has</th><th>Put it in</th><th class="text-right">Books</th><th></th></tr></thead>
+      <tbody>
+        {% for rule in rules %}
+        <tr>
+          <td>{{ rule.match_label }} “{{ rule.match_value }}”</td>
+          <td>{{ rule.category }}</td>
+          <td class="text-right">{{ rule.books }}</td>
+          <td class="text-right">
+            <form method="post" action="/taxonomy/rules/{{ rule.id }}/delete"
+                  onsubmit="return confirm({{ ('Remove this rule and its ' ~ rule.books ~ ' assignment(s)?') | tojson | forceescape }})">
+              <button class="btn-sm-ghost" type="submit">Remove</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="text-muted-foreground">No rules yet. Accept suggestions on Review, or add one below.</p>
+  {% endif %}
+  <form method="post" action="/taxonomy/map" class="mt-4 flex flex-wrap items-end gap-2">
+    <label class="grid gap-1 text-sm">When a book has
+      <select name="kind" class="select">
+        {% for key, label in match_kinds.items() %}<option value="{{ key }}">{{ label }}</option>{% endfor %}
+      </select>
+    </label>
+    <label class="grid gap-1 text-sm">named
+      <input type="text" name="value" class="input h-9 w-48" required placeholder="e.g. favorites">
+    </label>
+    <label class="grid gap-1 text-sm">put it in
+      <select name="to" class="select" required>
+        {% for c in choices %}<option value="{{ c.ref }}">{{ c.display }}</option>{% endfor %}
+      </select>
+    </label>
+    <button class="btn-sm h-9" type="submit">Add rule</button>
+  </form>
+</section>
+{% endblock %}

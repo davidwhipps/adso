@@ -72,9 +72,9 @@
     </div>
   </div>
 
-  {% if by_author or also_tagged %}
+  {% if in_series or by_author or also_tagged %}
   <div class="also">
-    {% for heading, em, items in [("More by", book.author, by_author), ("Also tagged", "#" ~ (book.tags[0] if book.tags else ""), also_tagged)] if items %}
+    {% for heading, em, items in [("In the series", bc.series.name if bc.series else "", in_series), ("More by", book.author, by_author), ("Also tagged", "#" ~ (book.tags[0] if book.tags else ""), also_tagged)] if items %}
     <h3>{{ heading }} <em>{{ em }}</em><span class="mono">{{ items | length }}</span></h3>
     <div class="strip">
       {% for b in items %}

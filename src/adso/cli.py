@@ -876,13 +876,18 @@ def _build_parser() -> argparse.ArgumentParser:
     tax_alias = taxonomy_sub.add_parser("alias", help="Add an alternative name used for matching")
     tax_alias.add_argument("category")
     tax_alias.add_argument("alias")
+    tax_unalias = taxonomy_sub.add_parser("unalias", help="Stop an alternative name matching a category")
+    tax_unalias.add_argument("category")
+    tax_unalias.add_argument("alias")
     taxonomy_sub.add_parser("rules", help="List shelf/subject/tag mapping rules")
     tax_map = taxonomy_sub.add_parser("map", help="Map a shelf, subject or tag to a category")
     tax_map_what = tax_map.add_mutually_exclusive_group(required=True)
     tax_map_what.add_argument("--shelf", help="Goodreads shelf name")
     tax_map_what.add_argument("--subject", help="Open Library subject")
     tax_map_what.add_argument("--tag", help="Local tag")
-    tax_map.add_argument("--to", dest="to", required=True, metavar="CATEGORY", help="Target category")
+    tax_map.add_argument(
+        "--to", dest="to", required=True, metavar="CATEGORY", help="Target category, or tag:NAME to add a tag"
+    )
     tax_unmap = taxonomy_sub.add_parser(
         "unmap", help="Delete a rule and the category assignments it made"
     )
@@ -1097,10 +1102,11 @@ def _auto_fetch_metadata(conn) -> None:
 def _auto_categorize(conn) -> None:
     """Apply accepted category rules to new/changed books; purely local, no network."""
     result = categorize_service.categorize(conn)
-    if result["assigned"] or result["removed"] or result["series"] or result["primaries_set"]:
+    if result["assigned"] or result["removed"] or result["series"] or result["primaries_set"] or result["tagged"]:
         print(
             f"\nCategories: {result['assigned']} assigned and {result['removed']} removed by your rules, "
-            f"{result['primaries_set']} primary genres set, {result['series']} series updated."
+            f"{result['tagged']} tag(s) added, {result['primaries_set']} primary genres set, "
+            f"{result['series']} series updated."
         )
     if result["pending"]:
         print(f"{result['pending']} categorisation suggestion(s) waiting — run `adso review`.")
@@ -1305,6 +1311,10 @@ def _run_taxonomy(conn, args) -> int:
         category = categorize_service.add_alias(conn, args.category, args.alias)
         print(f"{args.alias!r} now also matches {category.label}")
         return 0
+    if command == "unalias":
+        category = categorize_service.remove_alias(conn, args.category, args.alias)
+        print(f"{args.alias!r} no longer matches {category.label}; open suggestions were re-checked.")
+        return 0
     if command in ("merge", "delete"):
         taxonomy = categorize_service.Taxonomy(conn)
         source = taxonomy.resolve(args.source if command == "merge" else args.category)
@@ -1365,9 +1375,10 @@ def _format_categorize_result(result: dict[str, int], *, dry_run: bool) -> str:
     lines = [
         f"{prefix}Checked {result['books']} book(s): "
         f"{result['assigned']} categories assigned and {result['removed']} removed by rules, "
-        f"{result['primaries_set']} primary genres set, {result['series']} series updated.",
+        f"{result['tagged']} tag(s) added, {result['primaries_set']} primary genres set, "
+        f"{result['series']} series updated.",
         f"{result['new_proposals']} new mapping proposal(s) and {result['primaries_suggested']} "
-        f"primary-genre question(s); {result['pending']} suggestion(s) open in total.",
+        f"question(s) about single books; {result['pending']} suggestion(s) open in total.",
     ]
     if result["pending"] and not dry_run:
         lines.append("Next: `adso review`.")
@@ -1404,6 +1415,20 @@ def _format_suggestions(cards: list[dict[str, object]], *, heading: str | None =
                 lines.append(f"       from {sources}")
             if card.get("evidence"):
                 lines.append(f"       {card['evidence']}")
+    assigns = [card for card in cards if card["kind"] == "assign"]
+    if assigns:
+        if lines:
+            lines.append("")
+        lines.append("Check these — genres for particular books")
+        for card in assigns:
+            members = card["members"]  # type: ignore[index]
+            lines.append(f"  [{card['id']}] {card['target']} — {len(members)} book(s)")
+            if card.get("evidence"):
+                source = f" (suggested by {card['proposed_by']})" if card.get("proposed_by") not in (None, "adso") else ""
+                lines.append(f"       {card['evidence']}{source}")
+            shown = ", ".join(f"{m['subject'].split(' — ')[0]} [{m['id']}]" for m in members[:8])
+            more = f", and {len(members) - 8} more" if len(members) > 8 else ""
+            lines.append(f"       {shown}{more}")
     if primaries:
         if lines:
             lines.append("")
