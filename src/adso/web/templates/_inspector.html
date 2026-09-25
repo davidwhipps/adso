@@ -36,6 +36,7 @@
       <span class="dot {{ book.exclusive_shelf or '' }}">{{ shelf_labels.get(book.exclusive_shelf or '', book.reading_status or 'No shelf') }}</span>
       {% if book.date_read %}<span class="mono">read {{ book.date_read | audate }}</span>{% endif %}
     </div>
+    {% if bc is defined %}{% include "_book_categories.html" %}{% endif %}
     <div class="grid gap-1.5 text-sm">
       <span class="flabel">Tags</span>
       {% include "_local_tags.html" %}

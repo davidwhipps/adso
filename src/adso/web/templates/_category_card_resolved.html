@@ -1,0 +1,5 @@
+{# Replaces a category card once it is decided. Expects `card_id`, `message`. #}
+<div id="catcard-{{ card_id }}" class="card catcard">
+  <p class="text-sm text-muted-foreground">{{ message }}</p>
+</div>
+{% with oob=True %}{% include "_nav_badge.html" %}{% endwith %}

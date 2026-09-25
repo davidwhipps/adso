@@ -507,6 +507,12 @@ def _migrate_categories(conn: sqlite3.Connection) -> None:
             ON category_suggestions(match_kind, match_value) WHERE kind = 'map';
         CREATE UNIQUE INDEX IF NOT EXISTS idx_category_suggestions_primary
             ON category_suggestions(book_id, category_id) WHERE kind = 'primary';
+        -- kind='assign': "put this book in this category", proposed by an agent
+        -- (MCP) rather than derived from shelves; new-category proposals carry
+        -- proposed_facet/proposed_label with a NULL category_id.
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_category_suggestions_assign
+            ON category_suggestions(book_id, COALESCE(category_id, 0), COALESCE(proposed_label, ''))
+            WHERE kind = 'assign';
 
         CREATE TABLE IF NOT EXISTS series (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -522,6 +528,11 @@ def _migrate_categories(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_book_series_series ON book_series(series_id);
         """
     )
+    suggestion_columns = {row["name"] for row in conn.execute("PRAGMA table_info(category_suggestions)")}
+    if "proposed_by" not in suggestion_columns:
+        # Who raised a suggestion: 'adso' for the rule engine, or the agent/tool
+        # that proposed it (e.g. 'mcp'), shown to the reviewer.
+        conn.execute("ALTER TABLE category_suggestions ADD COLUMN proposed_by TEXT")
     seed_taxonomy(conn)
 
 

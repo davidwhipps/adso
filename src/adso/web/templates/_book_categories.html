@@ -1,0 +1,75 @@
+{# A book's categories as editable chips, grouped by facet, with where each came
+   from. × removes one (rules won't add it back to this book); ★ makes a genre
+   the primary one; the input adds any category from the user's taxonomy. The
+   whole block swaps in place. Expects `book`, `scope`, `bc` (categorize.
+   book_categories), `choices` (categorize.category_choices), optional `error`. #}
+{% set gid = book.goodreads_id %}
+{% set target = "#" ~ scope ~ "-cats-" ~ gid %}
+<div id="{{ scope }}-cats-{{ gid }}" class="cats">
+  {% if error %}<p class="cat-err" role="alert">{{ error }}</p>{% endif %}
+  <div class="cat-row">
+    <span class="flabel">Primary genre</span>
+    {% if bc.primary %}
+    <a class="catchip primary" href="/?category={{ bc.primary.id }}" title="{{ bc.primary.path }}">{{ bc.primary.label }}</a>
+    {% else %}
+    <span class="cat-none">None yet</span>
+    {% endif %}
+  </div>
+  {% for facet, label in facet_labels.items() %}{% set entries = bc.by_facet[facet] %}{% if entries %}
+  <div class="cat-row">
+    <span class="flabel">{{ label }}</span>
+    <div class="cat-chips">
+      {% for e in entries %}
+      {% set ref = e.facet ~ ":" ~ e.path %}
+      {% set why = "Set by you" if e.source == "user" else ("Default — " ~ e.evidence if e.source == "derived" else ("From " ~ e.evidence if e.evidence else "From a rule")) %}
+      <span class="catchip {{ 'primary' if e.role == 'primary' }} src-{{ e.source }}" title="{{ e.path }} · {{ why }}">
+        <a href="/?category={{ e.id }}">{{ e.label }}</a>
+        {% if facet == "genre" and e.role != "primary" %}
+        <button type="button" aria-label="Make {{ e.label }} the primary genre" title="Make primary"
+                hx-post="/book/{{ gid }}/categories/primary"
+                hx-vals='{"category": {{ ref | tojson }}, "scope": "{{ scope }}"}'
+                hx-target="{{ target }}" hx-swap="outerHTML">★</button>
+        {% endif %}
+        <button type="button" aria-label="Remove {{ e.label }}" title="Remove (rules won't add it back)"
+                hx-post="/book/{{ gid }}/categories/remove"
+                hx-vals='{"category": {{ ref | tojson }}, "scope": "{{ scope }}"}'
+                hx-target="{{ target }}" hx-swap="outerHTML">×</button>
+      </span>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}{% endfor %}
+  <form class="relative cat-add"
+        data-choices='{{ choices | map(attribute="display") | list | tojson }}'
+        x-data="{
+          q: '', open: false,
+          all: JSON.parse($el.dataset.choices || '[]'),
+          get matches() {
+            const s = this.q.trim().toLowerCase();
+            if (!s) return [];
+            return this.all.filter(c => c.toLowerCase().includes(s)).slice(0, 8);
+          },
+          pick(c) { this.q = c; this.open = false; this.$nextTick(() => this.$el.requestSubmit()); },
+        }"
+        hx-post="/book/{{ gid }}/categories/add"
+        hx-vals='{"scope": "{{ scope }}"}'
+        hx-target="{{ target }}" hx-swap="outerHTML"
+        @click.outside="open = false">
+    <input class="input h-7 w-52 text-sm" type="text" name="category" autocomplete="off"
+           placeholder="+ category" aria-label="Add a category"
+           x-model="q" @focus="open = true" @keydown.escape.stop="open = false">
+    <ul x-show="open && matches.length" x-cloak
+        class="absolute left-0 top-full z-40 mt-1 max-h-56 w-72 overflow-auto rounded-md border bg-background py-1 shadow-md">
+      <template x-for="m in matches" :key="m">
+        <li><button type="button" class="block w-full px-2.5 py-1 text-left text-sm hover:bg-muted"
+                    @mousedown.prevent="pick(m)" x-text="m"></button></li>
+      </template>
+    </ul>
+  </form>
+  {% if bc.series %}
+  <div class="cat-row">
+    <span class="flabel">Series</span>
+    <a class="chipsm" href="/?series={{ bc.series.name | urlencode }}">{{ bc.series.name }}{% if bc.series.position is not none %} {{ bc.series.position | series_pos }}{% endif %}</a>
+  </div>
+  {% endif %}
+</div>

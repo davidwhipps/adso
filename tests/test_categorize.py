@@ -488,6 +488,26 @@ class PrimaryDefaultTests(CategorizeTestCase):
         self.assertEqual(self.questions(), [])
 
 
+class ExportTests(CategorizeTestCase):
+    def test_exports_carry_categories_and_series(self):
+        import csv as csv_module
+
+        from adso.exports import catalogue_csv_string, catalogue_json_string
+
+        self.sync(LIBRARY)
+        cat.categorize(self.conn)
+        cat.accept_suggestion(self.conn, self.proposal("shelf", "sci fi")["id"])
+        cat.add_book_category(self.conn, self.book_id("1"), "theme:" + cat.add_category(self.conn, "theme:Belters").label)
+        rows = {r["goodreads_id"]: r for r in csv_module.DictReader(io.StringIO(catalogue_csv_string(self.conn)))}
+        self.assertEqual(rows["1"]["primary_genre"], "Speculative Fiction > Science Fiction")
+        self.assertEqual(rows["1"]["categories"], "Genre: Speculative Fiction > Science Fiction; Theme: Belters")
+        self.assertEqual((rows["1"]["series"], rows["1"]["series_position"]), ("The Expanse", "1"))
+        self.assertEqual(rows["4"]["categories"], "")
+        data = {b["goodreads_id"]: b for b in json.loads(catalogue_json_string(self.conn))}
+        self.assertEqual(data["2"]["series"], {"name": "The Expanse", "position": 2.0})
+        self.assertEqual(data["2"]["categories"], {"genre": ["Speculative Fiction > Science Fiction"]})
+
+
 class MergeDeleteTests(CategorizeTestCase):
     def setUp(self) -> None:
         super().setUp()

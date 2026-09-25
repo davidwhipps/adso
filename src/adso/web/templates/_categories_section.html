@@ -1,0 +1,22 @@
+{# Categories section of the Review page. Expects `category_cards`, `choices`. #}
+<section id="categories">
+  <div class="mb-6">
+    <h2 class="text-xl font-semibold tracking-tight">Categories</h2>
+    <p class="mt-1 text-muted-foreground">
+      {% if category_cards %}
+      {{ category_cards | length }} suggestion{{ "" if category_cards | length == 1 else "s" }}, the ones
+      affecting the most books first. Accepting a mapping creates a rule that also sorts new
+      books on every sync; rejected suggestions don't come back.
+      Manage categories and rules on <a class="underline" href="/taxonomy">Categories</a>.
+      {% else %}
+      Nothing to review. New suggestions appear after a sync or metadata fetch.
+      Manage categories and rules on <a class="underline" href="/taxonomy">Categories</a>.
+      {% endif %}
+    </p>
+  </div>
+  <div class="flex flex-col gap-4">
+    {% for card in category_cards %}
+      {% include "_category_card.html" %}
+    {% endfor %}
+  </div>
+</section>

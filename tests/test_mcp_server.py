@@ -217,5 +217,90 @@ class MCPServerTests(unittest.TestCase):
             self.assertEqual(before[field], after[field])
 
 
+class MCPCategoryTests(unittest.TestCase):
+    """Category reads, and agent proposals that only ever reach the review queue."""
+
+    def setUp(self) -> None:
+        from adso import categorize as cat
+
+        self.cat = cat
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self.tmp.name) / "adso.sqlite")
+        self.conn = db.connect(self.db_path)
+        db.initialize(self.conn)
+        _seed(self.conn)
+        self.conn.execute(
+            "UPDATE books SET shelves_json = '[\"read\", \"sci-fi\"]', "
+            "title = 'The Clockwork Herbarium (Herbaria, #1)' WHERE goodreads_id = '1'"
+        )
+        self.conn.commit()
+        cat.categorize(self.conn)
+        card = cat.list_suggestion_cards(self.conn)[0]
+        cat.accept_suggestion(self.conn, card["id"])
+
+    def tearDown(self) -> None:
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def test_books_carry_categories_and_filters_work(self):
+        result = mcp_server.search_books(self.conn, category="Speculative Fiction")
+        self.assertEqual(result["count"], 1)
+        book = result["books"][0]
+        self.assertEqual(book["primary_genre"], "Speculative Fiction > Science Fiction")
+        self.assertEqual(book["categories"]["genre"], ["Speculative Fiction > Science Fiction"])
+        self.assertEqual(book["series"]["name"], "Herbaria")
+        self.assertNotIn("id", book)
+        self.assertEqual(mcp_server.search_books(self.conn, goodreads_shelf="sci-fi")["count"], 1)
+        self.assertEqual(mcp_server.search_books(self.conn, series="herbaria")["count"], 1)
+        with self.assertRaises(ValueError):
+            mcp_server.search_books(self.conn, category="Nonexistent")
+
+    def test_facets_and_taxonomy(self):
+        facets = mcp_server.list_facets(self.conn)
+        self.assertIn("genre:Speculative Fiction > Science Fiction", facets["categories"])
+        self.assertEqual(facets["goodreads_shelves"], ["sci-fi"])
+        self.assertEqual(facets["series"], ["Herbaria"])
+        genre = next(f for f in mcp_server.list_taxonomy(self.conn)["facets"] if f["facet"] == "genre")
+        self.assertTrue(any(c["ref"] == "genre:Speculative Fiction" and c["total"] == 1 for c in genre["categories"]))
+
+    def test_agent_suggestions_wait_for_review(self):
+        result = mcp_server.suggest_categories(
+            self.conn, "2", ["Literary Fiction", "theme:Tides", "Nope"], reason="Quiet literary novel about the sea"
+        )
+        statuses = [r["status"] for r in result["results"]]
+        self.assertEqual(statuses, ["pending review", "pending review", "error"])
+        book_id = self.conn.execute("SELECT id FROM books WHERE goodreads_id = '2'").fetchone()[0]
+        self.assertEqual(self.cat.book_categories(self.conn, book_id)["by_facet"]["genre"], [])
+
+        open_cards = mcp_server.list_category_suggestions(self.conn)
+        assign = [s for s in open_cards["suggestions"] if s["kind"] == "assign"]
+        self.assertEqual(len(assign), 2)
+        self.assertEqual(assign[0]["proposed_by"], "mcp")
+        # Proposing the same thing twice doesn't duplicate it.
+        again = mcp_server.suggest_categories(self.conn, "2", ["Literary Fiction"])
+        self.assertEqual(again["results"][0]["status"], "already pending")
+
+        literary = next(s for s in assign if s["target"] == "Genre: Literary Fiction")
+        outcome = mcp_server.review_category_suggestion(self.conn, literary["id"], "accept")
+        self.assertEqual(outcome["decision"], "accepted")
+        detail = self.cat.book_categories(self.conn, book_id)
+        self.assertEqual(detail["primary"]["path"], "Literary Fiction")
+        self.assertEqual(detail["primary"]["source"], "user")
+
+        tides = next(s for s in assign if s["target"] == "new Theme: Tides")
+        mcp_server.review_category_suggestion(self.conn, tides["id"], "reject")
+        rejected = mcp_server.suggest_categories(self.conn, "2", ["theme:Tides"])
+        self.assertEqual(rejected["results"][0]["status"], "previously rejected")
+        with self.assertRaises(ValueError):
+            mcp_server.review_category_suggestion(self.conn, tides["id"], "maybe")
+
+    def test_private_notes_still_never_leak(self):
+        for result in (
+            mcp_server.search_books(self.conn, category="Speculative Fiction"),
+            mcp_server.get_book(self.conn, "1"),
+        ):
+            self.assertNotIn(SECRET, repr(result))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Categories in the web UI, MCP and exports** (phase 2).
+  - Library sidebar: a genre tree with roll-up counts, themes, and your custom
+    Goodreads shelves. The library also filters by series, in reading order.
+  - Book page and book sidebar: categories as chips grouped by facet, showing
+    where each came from, with add, remove and "make primary". A series line,
+    and an "In the series" strip on the full page.
+  - Review page: a Categories section with one card per target. Each card
+    offers accept, reject, "map to another category", and rejecting a single
+    source; primary-genre questions offer the book's genres as buttons. The
+    Review badge counts open cards.
+  - A new Categories page (More → Categories) to add, rename, move, merge,
+    alias and delete categories, and to add or remove mapping rules. Merges
+    and deletes confirm their impact first.
+  - MCP:
+    - Books now carry `primary_genre`, `categories` and `series`.
+    - `search_books` filters by `category`, `goodreads_shelf` and `series`.
+    - `list_facets` lists the categories in use, your custom shelves and series.
+    - New tools: `list_taxonomy`, `list_category_suggestions`,
+      `suggest_categories` and `review_category_suggestion`. Agent proposals only
+      reach the review queue, credited to the agent with its reason.
+  - `/api/books` gains the same filters and fields, and there's a new
+    `/api/taxonomy`.
+  - CSV and JSON exports include primary genre, categories, series and series
+    position. The Notion export is unchanged, since a missing "Genre" property
+    in the target database would fail every export.
+
 ### Changed
 - **Less manual categorisation review.** On a 1,000-book test library this cut review
   items from 71 to 37, mapping decisions from 50 to 23, and primary-genre questions

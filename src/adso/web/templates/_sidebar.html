@@ -1,7 +1,8 @@
-{# Library sidebar: shelves, smart views and tags, each with the count that
-   clicking it would show. Links are boosted by #browse. Expects `lib`, `p`. #}
+{# Library sidebar: shelves, smart views, genres, themes, tags and Goodreads
+   shelves, each with the count that clicking it would show. Links are boosted
+   by #browse. Expects `lib`, `p`. #}
 <aside class="side" id="side" aria-label="Shelves and tags">
-  <a href="{{ p.query(shelf='', smart='', tag='', book='') }}" class="nav {{ 'on' if not (p.shelf or p.smart or p.tag) }}">Library<span class="n">{{ lib.library_count }}</span></a>
+  <a href="{{ p.query(shelf='', smart='', tag='', category='', gr_shelf='', series='', book='') }}" class="nav {{ 'on' if not (p.shelf or p.smart or p.tag or p.category or p.gr_shelf or p.series) }}">Library<span class="n">{{ lib.library_count }}</span></a>
 
   <h5><i>01</i>Shelves</h5>
   {% for f in lib.shelves %}
@@ -13,7 +14,21 @@
   <a href="{{ f.url }}" class="nav {{ 'on' if f.active }} {{ 'zero' if not f.count }}">{{ f.label }}<span class="n">{{ f.count }}</span></a>
   {% endfor %}
 
-  <h5><i>03</i>Tags</h5>
+  <h5><i>03</i>Genres<a class="side-link" href="/taxonomy" hx-boost="false">Edit</a></h5>
+  {% for f in lib.genres %}
+  <a href="{{ f.url }}" class="nav {{ 'on' if f.active }} {{ 'zero' if not f.count }} {{ 'sub' if f.depth }}" style="--depth: {{ f.depth }}">{{ f.label }}<span class="n">{{ f.count }}</span></a>
+  {% else %}
+  <p class="side-note">No genres yet. Review the suggestions under <a href="/review#categories" hx-boost="false">Review</a> to sort your shelves into genres.</p>
+  {% endfor %}
+
+  {% if lib.themes %}
+  <h5><i>04</i>Themes</h5>
+  {% for f in lib.themes %}
+  <a href="{{ f.url }}" class="nav {{ 'on' if f.active }} {{ 'zero' if not f.count }} {{ 'sub' if f.depth }}" style="--depth: {{ f.depth }}">{{ f.label }}<span class="n">{{ f.count }}</span></a>
+  {% endfor %}
+  {% endif %}
+
+  <h5><i>05</i>Tags</h5>
   {% if lib.tags | length > 8 %}
   <input class="tagfilter" id="tagfilter" placeholder="Filter tags" aria-label="Filter tags" hx-boost="false">
   {% endif %}
@@ -24,4 +39,11 @@
     <p class="side-note">No tags yet. Open a book and add one, or select several and use <b>Add tag</b>.</p>
     {% endfor %}
   </div>
+
+  {% if lib.gr_shelves %}
+  <h5><i>06</i>Goodreads shelves</h5>
+  {% for f in lib.gr_shelves %}
+  <a href="{{ f.url }}" class="nav {{ 'on' if f.active }} {{ 'zero' if not f.count }}">{{ f.label }}<span class="n">{{ f.count }}</span></a>
+  {% endfor %}
+  {% endif %}
 </aside>

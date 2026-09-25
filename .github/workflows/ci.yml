@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install package with extras
-        run: python -m pip install -e ".[web,notion,covers]"
+        run: python -m pip install -e ".[web,notion,covers,dev]"
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
 

@@ -1364,8 +1364,175 @@ def _propose_mappings(
 
 
 # ---------------------------------------------------------------------------
+# Batch lookups (listing pages, API, MCP, exports)
+# ---------------------------------------------------------------------------
+
+
+def book_category_map(conn: sqlite3.Connection) -> dict[int, dict[int, str]]:
+    """book id -> {category id: role} for every assignment."""
+    out: dict[int, dict[int, str]] = defaultdict(dict)
+    for row in conn.execute("SELECT book_id, category_id, role FROM book_categories"):
+        out[row["book_id"]][row["category_id"]] = row["role"]
+    return out
+
+
+def book_series_map(conn: sqlite3.Connection) -> dict[int, dict[str, Any]]:
+    """book id -> {"name", "position"} for books in a series."""
+    return {
+        row["book_id"]: {"name": row["name"], "position": row["position"]}
+        for row in conn.execute(
+            "SELECT bs.book_id, s.name, bs.position FROM book_series bs JOIN series s ON s.id = bs.series_id"
+        )
+    }
+
+
+def attach_categories(conn: sqlite3.Connection, books: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Add ``primary_genre``, ``categories`` and ``series`` to catalogue records.
+
+    ``categories`` maps each facet to the category paths the book carries
+    (primary genre first); ``series`` is ``{"name", "position"}`` or None.
+    Records need their internal ``id``. Mutates and returns ``books``.
+    """
+    taxonomy = Taxonomy(conn)
+    assignments = book_category_map(conn)
+    series = book_series_map(conn)
+    for book in books:
+        by_facet: dict[str, list[str]] = {}
+        primary = None
+        roles = assignments.get(book.get("id"), {})
+        for category_id, role in sorted(
+            roles.items(), key=lambda kv: (kv[1] != "primary", taxonomy.path(kv[0]).lower())
+        ):
+            if category_id not in taxonomy.by_id:
+                continue
+            node = taxonomy.get(category_id)
+            path = taxonomy.path(category_id)
+            by_facet.setdefault(node.facet, []).append(path)
+            if role == "primary":
+                primary = path
+        book["primary_genre"] = primary
+        book["categories"] = by_facet
+        book["series"] = series.get(book.get("id"))
+    return books
+
+
+def category_choices(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Every category as a pick-list entry, in tree order per facet."""
+    return [
+        {"id": node["id"], "facet": facet["facet"], "path": node["path"], "ref": f"{facet['facet']}:{node['path']}",
+         "display": f"{facet['label']}: {node['path']}", "depth": node["depth"], "total": node["total"]}
+        for facet in taxonomy_tree(conn)
+        for node in facet["categories"]
+    ]
+
+
+def custom_shelves(conn: sqlite3.Connection) -> list[tuple[str, int]]:
+    """Goodreads shelves other than the status ones, with book counts."""
+    counts: dict[str, int] = defaultdict(int)
+    for row in conn.execute("SELECT exclusive_shelf, shelves_json FROM books"):
+        for shelf in json.loads(row["shelves_json"] or "[]"):
+            if shelf not in STATUS_SHELVES and shelf != (row["exclusive_shelf"] or ""):
+                counts[shelf] += 1
+    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+
+
+def series_books(conn: sqlite3.Connection, name: str) -> list[int]:
+    """Book ids in a series, in reading order."""
+    return [
+        row["book_id"]
+        for row in conn.execute(
+            """
+            SELECT bs.book_id FROM book_series bs JOIN series s ON s.id = bs.series_id
+            WHERE s.name = ? COLLATE NOCASE ORDER BY bs.position IS NULL, bs.position
+            """,
+            (name,),
+        )
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Agent proposals
+# ---------------------------------------------------------------------------
+
+
+def suggest_assignment(
+    conn: sqlite3.Connection,
+    book_id: int,
+    reference: str,
+    *,
+    reason: str | None = None,
+    proposed_by: str = "agent",
+) -> dict[str, Any]:
+    """Queue "this book belongs in this category" for the user to review.
+
+    Never assigns anything itself. ``reference`` must name an existing category,
+    or carry a facet prefix to propose a new one ("theme:Found family"), which
+    is only created if the user accepts. A proposal the user already rejected
+    is not raised again, and one the book already carries is a no-op.
+    """
+    _require_book(conn, book_id)
+    taxonomy = Taxonomy(conn)
+    category_id: int | None = None
+    new_facet = new_label = None
+    try:
+        category_id = taxonomy.resolve(reference).id
+    except CategoryError as exc:
+        facet, _ = _parse_reference(reference, None)
+        if facet is None or "more than one" in str(exc):
+            raise
+        new_facet = facet
+        new_label = str(reference).split(":", 1)[1].split(">")[-1].strip()
+        if not slugify(new_label):
+            raise
+    if category_id is not None and conn.execute(
+        "SELECT 1 FROM book_categories WHERE book_id = ? AND category_id = ?", (book_id, category_id)
+    ).fetchone():
+        return {"status": "already assigned", "category": taxonomy.display(category_id)}
+    existing = conn.execute(
+        """
+        SELECT id, status FROM category_suggestions
+        WHERE kind = 'assign' AND book_id = ? AND COALESCE(category_id, 0) = ?
+              AND COALESCE(proposed_label, '') = ?
+        """,
+        (book_id, category_id or 0, new_label or ""),
+    ).fetchone()
+    target = taxonomy.display(category_id) if category_id is not None else f"new {FACET_LABELS[new_facet]}: {new_label}"
+    if existing is not None:
+        if existing["status"] == "rejected":
+            return {"status": "previously rejected", "id": existing["id"], "category": target}
+        if existing["status"] == "pending":
+            return {"status": "already pending", "id": existing["id"], "category": target}
+    cur = conn.execute(
+        """
+        INSERT INTO category_suggestions
+            (kind, book_id, category_id, proposed_facet, proposed_label, confidence, book_count,
+             evidence, proposed_by)
+        VALUES ('assign', ?, ?, ?, ?, 0.5, 1, ?, ?)
+        ON CONFLICT(book_id, COALESCE(category_id, 0), COALESCE(proposed_label, '')) WHERE kind = 'assign'
+        DO UPDATE SET status = 'pending', evidence = excluded.evidence, proposed_by = excluded.proposed_by,
+                      decided_at = NULL, decided_by = NULL
+        """,
+        (book_id, category_id, new_facet, new_label, (reason or "").strip() or None, proposed_by),
+    )
+    conn.commit()
+    suggestion_id = cur.lastrowid or conn.execute(
+        """
+        SELECT id FROM category_suggestions WHERE kind = 'assign' AND book_id = ?
+              AND COALESCE(category_id, 0) = ? AND COALESCE(proposed_label, '') = ?
+        """,
+        (book_id, category_id or 0, new_label or ""),
+    ).fetchone()[0]
+    return {"status": "pending review", "id": int(suggestion_id), "category": target}
+
+
+# ---------------------------------------------------------------------------
 # Review
 # ---------------------------------------------------------------------------
+
+
+# Review order: library-wide mappings first (most leverage), then per-book
+# category proposals, then primary-genre questions.
+_KIND_ORDER = {"map": 0, "assign": 1, "primary": 2}
 
 
 def list_suggestions(conn: sqlite3.Connection, *, status: str = "pending") -> list[dict[str, Any]]:
@@ -1382,7 +1549,7 @@ def list_suggestions(conn: sqlite3.Connection, *, status: str = "pending") -> li
     items = [_describe_suggestion(taxonomy, row) for row in rows]
     items.sort(
         key=lambda item: (
-            item["kind"] != "map",
+            _KIND_ORDER.get(item["kind"], 9),
             -(item["book_count"] * item["confidence"]),
             item["subject"].lower(),
         )
@@ -1401,7 +1568,7 @@ def _describe_suggestion(taxonomy: Taxonomy, row: sqlite3.Row) -> dict[str, Any]
     if row["kind"] == "map":
         label = MATCH_KIND_LABELS.get(row["match_kind"], row["match_kind"])
         subject = f'{label} "{row["match_value"]}"'
-    else:
+    else:  # 'primary' and 'assign' are about one book
         author = f" — {row['book_author']}" if row["book_author"] else ""
         subject = f"{row['book_title'] or 'Unknown book'}{author}"
     return {
@@ -1420,6 +1587,7 @@ def _describe_suggestion(taxonomy: Taxonomy, row: sqlite3.Row) -> dict[str, Any]
         "book_count": row["book_count"],
         "evidence": row["evidence"],
         "status": row["status"],
+        "proposed_by": row["proposed_by"] if "proposed_by" in row.keys() else None,
     }
 
 
@@ -1437,6 +1605,16 @@ def _group_key(row: sqlite3.Row | dict[str, Any]) -> tuple:
     if row["category_id"] is not None:
         return ("category", row["category_id"])
     return ("new", row["proposed_facet"] or "theme", normalize_term(row["proposed_label"] or ""))
+
+
+def pending_card_count(conn: sqlite3.Connection) -> int:
+    """How many review cards are open (cheap: no book scan)."""
+    rows = conn.execute(
+        "SELECT kind, category_id, proposed_facet, proposed_label FROM category_suggestions WHERE status = 'pending'"
+    ).fetchall()
+    return len({_group_key(row) for row in rows if row["kind"] == "map"}) + sum(
+        1 for row in rows if row["kind"] != "map"
+    )
 
 
 def suggestion_group(conn: sqlite3.Connection, suggestion_id: int) -> list[int]:
@@ -1502,7 +1680,7 @@ def list_suggestion_cards(conn: sqlite3.Connection, *, status: str = "pending") 
         )
     cards.sort(
         key=lambda card: (
-            card["kind"] != "map",
+            _KIND_ORDER.get(card["kind"], 9),
             -(card["book_count"] * card["confidence"]),
             card["target"].lower() if card["kind"] == "map" else card["subject"].lower(),
         )
@@ -1554,6 +1732,13 @@ def accept_suggestion(
         _set_primary(conn, row["book_id"], category_id)
         conn.commit()
         return {"kind": "primary", "category": Taxonomy(conn).display(category_id), "books": 1, "sources": 1}
+    if row["kind"] == "assign":
+        _mark(conn, [suggestion_id], "accepted", actor, category_id=category_id)
+        # Accepting is the user's decision, so it lands as a user assignment.
+        _upsert_user_assignment(conn, row["book_id"], category_id, role=None)
+        _settle_primaries(conn, Taxonomy(conn), book_ids={row["book_id"]})
+        conn.commit()
+        return {"kind": "assign", "category": Taxonomy(conn).display(category_id), "books": 1, "sources": 1}
 
     members = [suggestion_id] if only else suggestion_group(conn, suggestion_id)
     _mark(conn, members, "accepted", actor, category_id=category_id)

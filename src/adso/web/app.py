@@ -11,10 +11,12 @@ from __future__ import annotations
 import os
 import sqlite3
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from dataclasses import replace
 from datetime import datetime
 from html import escape
 from pathlib import Path
+from urllib.parse import urlencode
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
@@ -155,6 +157,9 @@ API_BOOK_FIELDS = (
     "cover_url",
     "created_at",
     "updated_at",
+    "primary_genre",
+    "categories",
+    "series",
 )
 
 # Guard: fields the JSON API must never serialize, asserted against
@@ -205,6 +210,8 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
     templates.env.globals["js_version"] = _AssetVersion(STATIC_DIR / "adso.js")
     templates.env.globals.update(sorts=SORTS, sort_labels=SORT_LABELS, shelf_labels=SHELF_LABELS)
     templates.env.filters["audate"] = _short_au_date
+    templates.env.filters["series_pos"] = categorize_service.format_position
+    templates.env.globals["facet_labels"] = categorize_service.FACET_LABELS
 
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -236,10 +243,19 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         """
         pending = conflicts_service.pending_count(conn)
         dupes = dedupe_service.pending_count(conn)
+        categories = categorize_service.pending_card_count(conn)
         return {
             "pending_count": pending,
             "duplicate_count": dupes,
-            "review_count": pending + dupes,
+            "category_count": categories,
+            "review_count": pending + dupes + categories,
+        }
+
+    def _cat_ctx(conn: sqlite3.Connection, book: dict) -> dict:
+        """What the book's category block (_book_categories.html) renders."""
+        return {
+            "bc": categorize_service.book_categories(conn, int(book["id"])),
+            "choices": categorize_service.category_choices(conn),
         }
 
     def _rating_param(raw: str | None) -> int | None:
@@ -301,6 +317,9 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         shelf: str | None = Query(None),
         smart: str | None = Query(None),
         tag: str | None = Query(None),
+        category: str | None = Query(None, description="Category id (includes subcategories)"),
+        gr_shelf: str | None = Query(None, description="Any Goodreads shelf"),
+        series: str | None = Query(None),
         status: str | None = Query(None),
         format: str | None = Query(None),
         author: str | None = Query(None),
@@ -310,8 +329,9 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         book: str | None = Query(None, description="Goodreads ID to open in the book sidebar"),
     ) -> HTMLResponse:
         params = LibraryParams.clean(
-            q=q, shelf=shelf, smart=smart, tag=tag, status=status, format=format,
-            author=author, rating=_rating_param(rating), sort=sort, view=view, book=book,
+            q=q, shelf=shelf, smart=smart, tag=tag, category=category, gr_shelf=gr_shelf, series=series,
+            status=status, format=format, author=author, rating=_rating_param(rating), sort=sort,
+            view=view, book=book,
         )
         library = build_library(conn, params, cover_root)
         # The book sidebar survives a reload (and a trip to the full page and
@@ -324,9 +344,10 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
             "catalogue.html",
             {
                 "lib": library,
-                "p": params,
+                "p": library.params,
                 "open_book": open_book,
                 "all_tags": distinct_tags(conn),
+                **(_cat_ctx(conn, open_book) if open_book is not None else {}),
                 **_nav_ctx(conn),
             },
         )
@@ -351,7 +372,8 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         return templates.TemplateResponse(
             request,
             "_inspector.html",
-            {"book": _book_or_404(conn, goodreads_id), "all_tags": distinct_tags(conn)},
+            {"book": (book := _book_or_404(conn, goodreads_id)), "all_tags": distinct_tags(conn),
+             **_cat_ctx(conn, book)},
         )
 
     @app.get("/book/{goodreads_id}", response_class=HTMLResponse)
@@ -365,9 +387,18 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
             b for b in list_books(conn, BookFilters(author=book["author"]))
             if b["goodreads_id"] != goodreads_id and b["author"] == book["author"]
         ] if book.get("author") else []
+        cat_ctx = _cat_ctx(conn, book)
+        # The rest of the series, in reading order, ahead of the other strips.
+        in_series: list[dict] = []
+        if cat_ctx["bc"]["series"]:
+            in_series = [
+                b for b in list_books(conn, BookFilters(series=cat_ctx["bc"]["series"]["name"]))
+                if b["goodreads_id"] != goodreads_id
+            ]
+            by_author = [b for b in by_author if b not in in_series]
         also_tagged: list[dict] = []
         if book["tags"]:
-            seen = {goodreads_id, *(b["goodreads_id"] for b in by_author)}
+            seen = {goodreads_id, *(b["goodreads_id"] for b in by_author), *(b["goodreads_id"] for b in in_series)}
             also_tagged = [
                 b for b in sort_books(list_books(conn, BookFilters(tag=book["tags"][0])), "added")
                 if b["goodreads_id"] not in seen
@@ -380,6 +411,8 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
                 "all_tags": distinct_tags(conn),
                 "by_author": sort_books(by_author, "year")[:12],
                 "also_tagged": also_tagged[:12],
+                "in_series": in_series[:24],
+                **cat_ctx,
                 "shelf_label": SHELF_LABELS.get(book.get("exclusive_shelf") or "", book.get("reading_status") or ""),
                 **_nav_ctx(conn),
             },
@@ -579,6 +612,72 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         db.update_local_fields(conn, goodreads_id, {"tags_json": remaining})
         return _tags_fragment(request, conn, goodreads_id, scope)
 
+    # Categories are local data in their own tables (see adso.categorize): the
+    # user's edits here are final — a run never overrides them, and a removed
+    # category is remembered so rules don't add it back to this book.
+    def _categories_fragment(
+        request: Request,
+        conn: sqlite3.Connection,
+        goodreads_id: str,
+        scope: str,
+        action: Callable[[int], object] | None = None,
+    ) -> HTMLResponse:
+        book = get_book(conn, goodreads_id)
+        if book is None:
+            raise HTTPException(status_code=404, detail=f"No book for Goodreads ID {goodreads_id}")
+        error = None
+        if action is not None:
+            try:
+                action(int(book["id"]))
+            except categorize_service.CategoryError as exc:
+                error = str(exc)
+        return templates.TemplateResponse(
+            request,
+            "_book_categories.html",
+            {"book": book, "scope": _scope(scope), "error": error, **_cat_ctx(conn, book)},
+        )
+
+    @app.post("/book/{goodreads_id}/categories/add", response_class=HTMLResponse)
+    def category_add(
+        request: Request,
+        goodreads_id: str,
+        conn: sqlite3.Connection = Depends(get_conn),
+        category: str = Form(""),
+        scope: str = Form("detail"),
+    ) -> HTMLResponse:
+        if not category.strip():
+            return _categories_fragment(request, conn, goodreads_id, scope)
+        return _categories_fragment(
+            request, conn, goodreads_id, scope,
+            lambda book_id: categorize_service.add_book_category(conn, book_id, category),
+        )
+
+    @app.post("/book/{goodreads_id}/categories/remove", response_class=HTMLResponse)
+    def category_remove(
+        request: Request,
+        goodreads_id: str,
+        conn: sqlite3.Connection = Depends(get_conn),
+        category: str = Form(...),
+        scope: str = Form("detail"),
+    ) -> HTMLResponse:
+        return _categories_fragment(
+            request, conn, goodreads_id, scope,
+            lambda book_id: categorize_service.remove_book_category(conn, book_id, category),
+        )
+
+    @app.post("/book/{goodreads_id}/categories/primary", response_class=HTMLResponse)
+    def category_primary(
+        request: Request,
+        goodreads_id: str,
+        conn: sqlite3.Connection = Depends(get_conn),
+        category: str = Form(...),
+        scope: str = Form("detail"),
+    ) -> HTMLResponse:
+        return _categories_fragment(
+            request, conn, goodreads_id, scope,
+            lambda book_id: categorize_service.set_primary_genre(conn, book_id, category),
+        )
+
     @app.get("/covers/{goodreads_id}")
     def cover(
         goodreads_id: str,
@@ -613,10 +712,22 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         tag: str | None = Query(None),
         author: str | None = Query(None),
         rating: str | None = Query(None),
+        category: str | None = Query(None, description="Category, e.g. 'genre:Fantasy' (includes subcategories)"),
+        gr_shelf: str | None = Query(None, description="Any Goodreads shelf"),
+        series: str | None = Query(None, description="Series name (reading order)"),
         limit: int | None = Query(None, ge=1),
     ) -> dict:
-        filters = _filters(status, format, tag, author, _rating_param(rating), limit)
-        books = _query_books(conn, q, filters)
+        filters = replace(
+            _filters(status, format, tag, author, _rating_param(rating), limit),
+            category=(category or "").strip() or None,
+            gr_shelf=(gr_shelf or "").strip() or None,
+            series=(series or "").strip() or None,
+        )
+        try:
+            books = _query_books(conn, q, filters)
+        except categorize_service.CategoryError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        categorize_service.attach_categories(conn, books)
         return {"count": len(books), "books": [_book_to_api_dict(b) for b in books]}
 
     @app.get("/api/books/{goodreads_id}")
@@ -627,7 +738,7 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         book = get_book(conn, goodreads_id)
         if book is None:
             raise HTTPException(status_code=404, detail=f"No book for Goodreads ID {goodreads_id}")
-        return _book_to_api_dict(book)
+        return _book_to_api_dict(categorize_service.attach_categories(conn, [book])[0])
 
     def _review_context(conn: sqlite3.Connection) -> dict:
         """Everything the consolidated Review page renders: field conflicts and
@@ -636,6 +747,8 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
         conflict_groups = conflicts_service.list_open_conflicts(conn)
         duplicate_groups = dedupe_service.list_open_duplicates(conn)
         return {
+            "category_cards": [_with_options(conn, c) for c in categorize_service.list_suggestion_cards(conn)],
+            "choices": categorize_service.category_choices(conn),
             "conflict_groups": conflict_groups,
             "conflict_total": sum(len(group["conflicts"]) for group in conflict_groups),
             "decided": conflicts_service.list_decided_conflicts(conn),
@@ -644,6 +757,229 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
             "duplicate_total": len(duplicate_groups),
             **_nav_ctx(conn),
         }
+
+    def _with_options(conn: sqlite3.Connection, card: dict) -> dict:
+        """Give a primary-genre card its candidate genres to choose between."""
+        if card["kind"] == "primary":
+            genres = categorize_service.book_categories(conn, card["book_id"])["by_facet"]["genre"]
+            card["options"] = [
+                {"id": g["id"], "path": g["path"], "ref": f"genre:{g['path']}"}
+                for g in genres if g["source"] != "derived"
+            ]
+        return card
+
+    def _card_after(
+        request: Request, conn: sqlite3.Connection, card_id: int, remaining: list[int], message: str
+    ) -> HTMLResponse:
+        """What replaces a card after a decision.
+
+        Deciding one source of a grouped card (``only``) leaves the rest of the
+        card, which re-renders in the same slot (the client targets the card
+        element, so its id may change to the new lead source). Otherwise the
+        card collapses to a one-line outcome.
+        """
+        if remaining:
+            for card in categorize_service.list_suggestion_cards(conn):
+                if any(m["id"] in remaining for m in card["members"]):
+                    return templates.TemplateResponse(
+                        request, "_category_card.html",
+                        {"card": _with_options(conn, card), "choices": categorize_service.category_choices(conn)},
+                    )
+        return templates.TemplateResponse(
+            request, "_category_card_resolved.html", {"card_id": card_id, "message": message, **_nav_ctx(conn)}
+        )
+
+    @app.post("/categories/suggestions/{suggestion_id}/accept", response_class=HTMLResponse)
+    def accept_category_suggestion(
+        request: Request,
+        suggestion_id: int,
+        conn: sqlite3.Connection = Depends(get_conn),
+        as_category: str = Form(""),
+        only: str = Form(""),
+    ) -> HTMLResponse:
+        try:
+            members = categorize_service.suggestion_group(conn, suggestion_id)
+            outcome = categorize_service.accept_suggestion(
+                conn, suggestion_id, as_category=as_category.strip() or None, only=bool(only), actor="web"
+            )
+        except categorize_service.CategoryError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        if outcome["kind"] == "map":
+            message = (
+                f"Mapped to {outcome['category']}: now on {outcome['books']} book(s), "
+                "and on new ones after each sync."
+            )
+        elif outcome["kind"] == "primary":
+            message = f"Primary genre set: {outcome['category']}."
+        else:
+            message = f"Added {outcome['category']}."
+        remaining = [m for m in members if m != suggestion_id] if only else []
+        return _card_after(request, conn, suggestion_id, remaining, message)
+
+    @app.post("/categories/suggestions/{suggestion_id}/reject", response_class=HTMLResponse)
+    def reject_category_suggestion(
+        request: Request,
+        suggestion_id: int,
+        conn: sqlite3.Connection = Depends(get_conn),
+        only: str = Form(""),
+    ) -> HTMLResponse:
+        try:
+            members = categorize_service.suggestion_group(conn, suggestion_id)
+            item = categorize_service.reject_suggestion(conn, suggestion_id, only=bool(only), actor="web")
+        except categorize_service.CategoryError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        if item["kind"] == "primary":
+            message = f"Rejected {item['target']} as the primary genre."
+        else:
+            message = f"Rejected: {item['target']} won't be suggested for these again."
+        remaining = [m for m in members if m != suggestion_id] if only else []
+        return _card_after(request, conn, suggestion_id, remaining, message)
+
+    # ------------------------------------------------------------- taxonomy
+    # The Categories page edits the user's vocabulary. Every action is a plain
+    # form POST that redirects back with a message, so it works without JS;
+    # merge and delete confirm in the browser with their impact first.
+
+    def _category_ref(conn: sqlite3.Connection, category_id: int) -> str:
+        taxonomy = categorize_service.Taxonomy(conn)
+        if category_id not in taxonomy.by_id:
+            raise HTTPException(status_code=404, detail=f"No category {category_id}")
+        return f"{taxonomy.get(category_id).facet}:{taxonomy.path(category_id)}"
+
+    def _taxonomy_redirect(message: str = "", error: str = "", anchor: str = "") -> RedirectResponse:
+        query = urlencode({k: v for k, v in (("msg", message), ("error", error)) if v})
+        return RedirectResponse(f"/taxonomy{'?' + query if query else ''}{anchor}", status_code=303)
+
+    def _taxonomy_action(action: Callable[[], str], anchor: str = "") -> RedirectResponse:
+        try:
+            return _taxonomy_redirect(message=action(), anchor=anchor)
+        except categorize_service.CategoryError as exc:
+            detail = f"{exc} {exc.hint}" if exc.hint and "adso " not in exc.hint else str(exc)
+            return _taxonomy_redirect(error=detail, anchor=anchor)
+
+    @app.get("/taxonomy", response_class=HTMLResponse)
+    def taxonomy_page(
+        request: Request,
+        conn: sqlite3.Connection = Depends(get_conn),
+        msg: str = Query(""),
+        error: str = Query(""),
+    ) -> HTMLResponse:
+        aliases: dict[int, list[str]] = {}
+        for row in conn.execute("SELECT category_id, alias FROM category_aliases ORDER BY alias"):
+            aliases.setdefault(row["category_id"], []).append(row["alias"])
+        facets = categorize_service.taxonomy_tree(conn)
+        for facet in facets:
+            for node in facet["categories"]:
+                node["ref"] = f"{facet['facet']}:{node['path']}"
+                node["aliases"] = aliases.get(node["id"], [])
+                node.update(categorize_service.category_impact(conn, node["id"]))
+        return templates.TemplateResponse(
+            request,
+            "taxonomy.html",
+            {
+                "facets": facets,
+                "choices": categorize_service.category_choices(conn),
+                "rules": categorize_service.list_rules(conn),
+                "match_kinds": categorize_service.MATCH_KIND_LABELS,
+                "msg": msg,
+                "error": error,
+                **_nav_ctx(conn),
+            },
+        )
+
+    @app.post("/taxonomy/add")
+    def taxonomy_add(
+        conn: sqlite3.Connection = Depends(get_conn),
+        facet: str = Form("genre"),
+        parent: str = Form(""),
+        name: str = Form(...),
+    ) -> RedirectResponse:
+        reference = f"{parent} > {name}" if parent.strip() else f"{facet}:{name}"
+
+        def action() -> str:
+            category = categorize_service.add_category(conn, reference)
+            return f"Added {categorize_service.Taxonomy(conn).display(category.id)}."
+
+        return _taxonomy_action(action)
+
+    @app.post("/taxonomy/{category_id}/rename")
+    def taxonomy_rename(
+        category_id: int, conn: sqlite3.Connection = Depends(get_conn), label: str = Form(...)
+    ) -> RedirectResponse:
+        ref = _category_ref(conn, category_id)
+        return _taxonomy_action(
+            lambda: f"Renamed to {categorize_service.rename_category(conn, ref, label).label}; the old name still matches.",
+            f"#cat-{category_id}",
+        )
+
+    @app.post("/taxonomy/{category_id}/move")
+    def taxonomy_move(
+        category_id: int, conn: sqlite3.Connection = Depends(get_conn), parent: str = Form("")
+    ) -> RedirectResponse:
+        ref = _category_ref(conn, category_id)
+
+        def action() -> str:
+            moved = categorize_service.move_category(conn, ref, parent.strip() or None)
+            return f"Moved to {categorize_service.Taxonomy(conn).display(moved.id)}."
+
+        return _taxonomy_action(action, f"#cat-{category_id}")
+
+    @app.post("/taxonomy/{category_id}/merge")
+    def taxonomy_merge(
+        category_id: int, conn: sqlite3.Connection = Depends(get_conn), target: str = Form(...)
+    ) -> RedirectResponse:
+        ref = _category_ref(conn, category_id)
+
+        def action() -> str:
+            result = categorize_service.merge_categories(conn, ref, target)
+            return f"Merged {result['source']} into {result['target']} ({result['books']} book(s) moved)."
+
+        return _taxonomy_action(action)
+
+    @app.post("/taxonomy/{category_id}/delete")
+    def taxonomy_delete(category_id: int, conn: sqlite3.Connection = Depends(get_conn)) -> RedirectResponse:
+        ref = _category_ref(conn, category_id)
+
+        def action() -> str:
+            result = categorize_service.delete_category(conn, ref)
+            return f"Deleted {result['category']} (removed from {result['books']} book(s))."
+
+        return _taxonomy_action(action)
+
+    @app.post("/taxonomy/{category_id}/alias")
+    def taxonomy_alias(
+        category_id: int, conn: sqlite3.Connection = Depends(get_conn), alias: str = Form(...)
+    ) -> RedirectResponse:
+        ref = _category_ref(conn, category_id)
+        return _taxonomy_action(
+            lambda: f"“{alias.strip()}” now also matches {categorize_service.add_alias(conn, ref, alias).label}.",
+            f"#cat-{category_id}",
+        )
+
+    @app.post("/taxonomy/map")
+    def taxonomy_map(
+        conn: sqlite3.Connection = Depends(get_conn),
+        kind: str = Form("shelf"),
+        value: str = Form(...),
+        to: str = Form(...),
+    ) -> RedirectResponse:
+        def action() -> str:
+            outcome = categorize_service.add_rule(conn, kind, value, to, actor="web")
+            return f"Mapped {kind} “{value.strip()}” to {outcome['category']} ({outcome['books']} book(s))."
+
+        return _taxonomy_action(action, "#rules")
+
+    @app.post("/taxonomy/rules/{rule_id}/delete")
+    def taxonomy_unmap(rule_id: int, conn: sqlite3.Connection = Depends(get_conn)) -> RedirectResponse:
+        def action() -> str:
+            rule = categorize_service.delete_rule(conn, rule_id)
+            return f"Removed the rule for {rule['match_label']} “{rule['match_value']}” and its {rule['books']} assignment(s)."
+
+        return _taxonomy_action(action, "#rules")
+
+    @app.get("/api/taxonomy")
+    def api_taxonomy(conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+        return {"facets": categorize_service.taxonomy_tree(conn)}
 
     @app.get("/review", response_class=HTMLResponse)
     def review_page(
