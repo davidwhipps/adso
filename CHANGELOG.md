@@ -42,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pickers, subjects such as "19th century" aren't proposed as eras, and a rule
   or "accept as" pointing at an era is refused. You can still set one book's
   era by hand.
+- **Less to review.** Lead (primary) genres are now always picked
+  automatically instead of raising a "Which one leads?" card per book, and
+  novels that Open Library files under a nonfiction subject ("History",
+  "Biography") are left out of that genre instead of raising a question.
+  Open questions of both kinds are withdrawn on upgrade. Review is left with
+  the mapping decisions that apply across your library.
 - Review cards explain a decision that can't go through instead of doing
   nothing: a card that was already settled (for example withdrawn when
   another decision re-checked the queue) collapses with the reason, and a

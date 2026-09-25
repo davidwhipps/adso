@@ -137,15 +137,12 @@ class WebCategoryTests(unittest.TestCase):
         stale = self.client.post(f"/categories/suggestions/{sid}/accept")
         self.assertIn("Nothing to do: this suggestion was withdrawn", stale.text)
 
-    def test_primary_question_offers_its_genres(self):
+    def test_lead_genre_is_picked_without_a_question(self):
         self.accept("Genre: Science Fiction")
         self.accept("Genre: Horror & Gothic")
         cat.add_book_category(self.conn, self.book_id("5"), "genre:History")
-        body = self.client.get("/review").text
-        self.assertIn("Which one leads?", body)
-        question = next(c for c in cat.list_suggestion_cards(self.conn) if c["kind"] == "primary")
-        self.client.post(f"/categories/suggestions/{question['id']}/accept", data={"as_category": "genre:History"})
-        self.assertEqual(cat.book_categories(self.conn, self.book_id("5"))["primary"]["path"], "History")
+        self.assertNotIn("Which one leads?", self.client.get("/review").text)
+        self.assertIsNotNone(cat.book_categories(self.conn, self.book_id("5"))["primary"])
 
     # --- Library --------------------------------------------------------------
 
@@ -262,7 +259,7 @@ class WebCategoryTests(unittest.TestCase):
     def test_import_page_explains_shelves(self):
         self.assertIn("Your Goodreads shelves are how you organised books there", self.client.get("/import").text)
 
-    def test_novel_question_card(self):
+    def test_novels_are_not_asked_about(self):
         conn = self.conn
         conn.execute("UPDATE books SET subjects_json = ? WHERE goodreads_id IN ('1', '2')",
                      (json.dumps(["Fiction", "History"]),))
@@ -270,12 +267,7 @@ class WebCategoryTests(unittest.TestCase):
         cat.categorize(conn)
         for target in ("Form: Fiction", "Genre: History"):
             self.accept(target)
-        body = self.client.get("/review").text
-        self.assertIn("Genre: History?", body)
-        self.assertIn("Open Library files these novels under “history”", body)
-        question = next(c for c in cat.list_suggestion_cards(conn) if c["kind"] == "assign")
-        response = self.client.post(f"/categories/suggestions/{question['id']}/accept")
-        self.assertIn("Added Genre: History", response.text)
+        self.assertNotIn("Genre: History?", self.client.get("/review").text)
 
     # --- API ------------------------------------------------------------------
 
