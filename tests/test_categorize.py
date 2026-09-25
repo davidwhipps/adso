@@ -264,6 +264,29 @@ class EngineTests(CategorizeTestCase):
         values = [item["match_value"] for item in cat.list_suggestions(self.conn)]
         self.assertNotIn("cozy fantasy", values)
 
+    def test_deleting_a_mapped_category_reopens_its_shelf(self):
+        self.sync(LIBRARY)
+        cat.categorize(self.conn)
+        cat.accept_suggestion(self.conn, self.proposal("shelf", "space opera")["id"])
+        cat.delete_category(self.conn, "Space Opera")
+        cat.categorize(self.conn)
+        # The shelf is unmapped again, so it is asked about again (with a new guess).
+        self.assertEqual(self.proposal("shelf", "space opera")["book_count"], 2)
+
+    def test_dated_and_club_shelves_are_not_proposed(self):
+        self.sync([
+            book("8", "A", "read, read-in-2024, 2025-reads, book-club"),
+            book("9", "B", "read, lit-fic, whodunnit, popsci, ww2"),
+        ])
+        cat.categorize(self.conn)
+        items = {item["match_value"]: item["target"] for item in cat.list_suggestions(self.conn)}
+        for skipped in ("read in 2024", "2025 reads", "book club"):
+            self.assertNotIn(skipped, items)
+        self.assertEqual(items["lit fic"], "Genre: Literary Fiction")
+        self.assertEqual(items["whodunnit"], "Genre: Mystery & Crime")
+        self.assertEqual(items["popsci"], "Genre: Science")
+        self.assertEqual(items["ww2"], "Genre: History > Military History")
+
     def test_dry_run_writes_nothing(self):
         self.sync(LIBRARY)
         result = cat.categorize(self.conn, dry_run=True)
@@ -302,15 +325,15 @@ class PrimaryGenreTests(CategorizeTestCase):
         cat.categorize(self.conn)
         self.assertEqual(len(self.primary_questions()), 1)
 
-    def test_rejecting_the_pick_asks_about_the_next_candidate(self):
+    def test_rejecting_the_pick_leaves_the_other_candidate(self):
         self.accept("mystery")
         self.accept("historical fiction")
         cat.reject_suggestion(self.conn, self.primary_questions()[0]["id"])
-        self.assertIsNone(self.primary("4"))
-        self.assertEqual(self.primary_questions()[0]["target"], "Genre: Historical Fiction")
-        cat.accept_suggestion(self.conn, self.primary_questions()[0]["id"])
+        # Only one candidate is left, so it becomes the (provisional) primary.
         self.assertEqual(self.primary("4"), "Historical Fiction")
         self.assertEqual(self.primary_questions(), [])
+        cat.categorize(self.conn)
+        self.assertEqual(self.primary("4"), "Historical Fiction")
 
     def test_user_primary_is_final(self):
         self.accept("sci fi")
@@ -328,6 +351,141 @@ class PrimaryGenreTests(CategorizeTestCase):
                 "INSERT INTO book_categories (book_id, category_id, role, source) VALUES (?, ?, 'primary', 'user')",
                 (self.book_id("1"), genre),
             )
+
+
+class GroupedReviewTests(CategorizeTestCase):
+    """One card per target: a shelf and the OL spellings of the same genre."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.sync([
+            book("1", "It", "read, horror"),
+            book("2", "Carrie", "read, horror"),
+            book("3", "Dracula", "read"),
+            book("4", "Frankenstein", "to-read, stoicism"),
+        ])
+        subjects = {
+            "1": ["Horror tales", "Fiction, horror"],
+            "3": ["Horror tales"],
+            "4": ["Fiction, horror"],
+        }
+        for goodreads_id, values in subjects.items():
+            self.conn.execute(
+                "UPDATE books SET subjects_json = ? WHERE goodreads_id = ?", (json.dumps(values), goodreads_id)
+            )
+        self.conn.commit()
+        cat.categorize(self.conn)
+
+    def horror_card(self) -> dict:
+        return next(c for c in cat.list_suggestion_cards(self.conn) if c["target"] == "Genre: Speculative Fiction > Horror")
+
+    def test_sources_with_one_target_form_one_card_with_distinct_books(self):
+        card = self.horror_card()
+        values = sorted(m["match_value"] for m in card["members"])
+        self.assertEqual(values, ["fiction horror", "horror", "horror tales"])
+        self.assertEqual(card["book_count"], 4)  # books 1-4, counted once each
+        themes = [c for c in cat.list_suggestion_cards(self.conn) if c["target"] == "new Theme: Stoicism"]
+        self.assertEqual(len(themes[0]["members"]), 1)
+
+    def test_accepting_any_member_accepts_the_card(self):
+        member = self.horror_card()["members"][-1]["id"]
+        outcome = cat.accept_suggestion(self.conn, member)
+        self.assertEqual(outcome["sources"], 3)
+        self.assertEqual(outcome["books"], 4)
+        self.assertEqual(len(cat.list_rules(self.conn)), 3)
+        self.assertEqual(self.paths("3"), ["Speculative Fiction > Horror"])
+
+    def test_only_narrows_to_one_source(self):
+        card = self.horror_card()
+        subject = next(m for m in card["members"] if m["match_value"] == "horror tales")
+        cat.reject_suggestion(self.conn, subject["id"], only=True)
+        outcome = cat.accept_suggestion(self.conn, card["id"])
+        self.assertEqual(outcome["sources"], 2)
+        self.assertEqual(self.paths("3"), [])  # only backed by the rejected subject
+        cat.reopen_suggestion(self.conn, subject["id"], only=True)
+        cat.accept_suggestion(self.conn, subject["id"], only=True)
+        self.assertEqual(self.paths("3"), ["Speculative Fiction > Horror"])
+
+    def test_rejecting_a_card_rejects_every_source(self):
+        cat.reject_suggestion(self.conn, self.horror_card()["id"])
+        cat.categorize(self.conn)
+        targets = [c["target"] for c in cat.list_suggestion_cards(self.conn)]
+        self.assertNotIn("Genre: Speculative Fiction > Horror", targets)
+        self.assertEqual(len(cat.list_suggestions(self.conn, status="rejected")), 3)
+
+
+class PrimaryDefaultTests(CategorizeTestCase):
+    """Settle primaries without asking where the evidence allows."""
+
+    def map_all(self) -> None:
+        cat.categorize(self.conn)
+        for card in cat.list_suggestion_cards(self.conn):
+            if card["kind"] == "map" and not card["target"].startswith("new "):
+                cat.accept_suggestion(self.conn, card["id"])
+
+    def questions(self) -> list[dict]:
+        return [c for c in cat.list_suggestion_cards(self.conn) if c["kind"] == "primary"]
+
+    def set_subjects(self, goodreads_id: str, values: list[str]) -> None:
+        self.conn.execute(
+            "UPDATE books SET subjects_json = ? WHERE goodreads_id = ?", (json.dumps(values), goodreads_id)
+        )
+        self.conn.commit()
+
+    def test_your_shelf_beats_an_open_library_subject(self):
+        self.sync([book("1", "Piranesi", "read, fantasy")])
+        self.set_subjects("1", ["Mystery general"])
+        self.map_all()
+        self.assertEqual(self.primary("1"), "Speculative Fiction > Fantasy")
+        self.assertEqual(self.questions(), [])
+
+    def test_sibling_subgenres_default_to_their_parent(self):
+        self.sync([book("1", "Neuromancer in Space", "read, cyberpunk, space-opera")])
+        self.map_all()
+        self.assertEqual(self.primary("1"), "Speculative Fiction > Science Fiction")
+        self.assertEqual(self.questions(), [])
+        detail = cat.book_categories(self.conn, self.book_id("1"))
+        derived = detail["primary"]
+        self.assertEqual(derived["source"], "derived")
+        self.assertIn("Cyberpunk", derived["evidence"])
+
+    def test_derived_default_goes_when_evidence_settles(self):
+        self.sync([book("1", "Neuromancer in Space", "read, cyberpunk, space-opera")])
+        self.map_all()
+        self.sync([book("1", "Neuromancer in Space", "read, cyberpunk")], name="later.csv")
+        cat.categorize(self.conn)
+        self.assertEqual(self.primary("1"), "Speculative Fiction > Science Fiction > Cyberpunk")
+        self.assertEqual(self.paths("1"), ["Speculative Fiction > Science Fiction > Cyberpunk"])
+
+    def test_derived_parent_becomes_a_rule_row_when_mapped_directly(self):
+        self.sync([book("1", "Neuromancer in Space", "read, cyberpunk, space-opera")])
+        self.map_all()
+        self.sync([book("1", "Neuromancer in Space", "read, cyberpunk, space-opera, sci-fi")], name="later.csv")
+        self.map_all()
+        detail = cat.book_categories(self.conn, self.book_id("1"))
+        self.assertEqual(detail["primary"]["path"], "Speculative Fiction > Science Fiction")
+        self.assertEqual(detail["primary"]["source"], "rule")
+
+    def test_unrelated_genres_still_ask(self):
+        self.sync([book("1", "The Name of the Rose", "read, mystery, historical-fiction")])
+        self.map_all()
+        # The first genre mapped stays as the provisional pick; one question confirms it.
+        questions = self.questions()
+        self.assertEqual(len(questions), 1)
+        self.assertEqual(f"Genre: {self.primary('1')}", questions[0]["target"])
+
+    def test_user_primary_and_removals_are_respected(self):
+        self.sync([book("1", "Neuromancer in Space", "read, cyberpunk, space-opera")])
+        self.map_all()
+        book_id = self.book_id("1")
+        cat.remove_book_category(self.conn, book_id, "Science Fiction")
+        # Removing the derived default: it is not derived back, so the book asks.
+        self.assertIsNone(self.primary("1"))
+        self.assertEqual(len(self.questions()), 1)
+        cat.set_primary_genre(self.conn, book_id, "Space Opera")
+        cat.categorize(self.conn)
+        self.assertEqual(self.primary("1"), "Speculative Fiction > Science Fiction > Space Opera")
+        self.assertEqual(self.questions(), [])
 
 
 class MergeDeleteTests(CategorizeTestCase):
@@ -449,7 +607,8 @@ class CliTests(CategorizeTestCase):
         self.assertEqual(code, 0)
         self.assertIn("mapping proposal", out)
         _, listing = self.run_cli("review")
-        self.assertIn('Goodreads shelf "sci fi" (2 book(s))', listing)
+        self.assertIn("Genre: Speculative Fiction > Science Fiction — 2 book(s)", listing)
+        self.assertIn('from shelf "sci fi"', listing)
         sid = self.proposal("shelf", "sci fi")["id"]
         code, out = self.run_cli("review", str(sid), "--accept")
         self.assertEqual(code, 0)
@@ -469,6 +628,13 @@ class CliTests(CategorizeTestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(self.primary("5"), "Philosophy")
         self.assertEqual(self.paths("5", "form"), ["Nonfiction"])
+
+    def test_review_only_flag(self):
+        self.run_cli("categorize")
+        sid = self.proposal("shelf", "stoicism")["id"]
+        code, out = self.run_cli("review", str(sid), "--only", "--reject")
+        self.assertEqual(code, 0, out)
+        self.assertIn(f'Rejected [{sid}] Goodreads shelf "stoicism"', out)
 
     def test_delete_needs_confirmation(self):
         _, out = self.run_cli("taxonomy", "delete", "Horror")

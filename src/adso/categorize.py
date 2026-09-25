@@ -67,8 +67,17 @@ NON_CATEGORY_SHELVES = frozenset(
         "abandoned",
         "recommendations",
         "recommended",
+        "book club",
+        "bookclub",
     }
 )
+
+# Date-stamped shelves ("read-in-2024", "2025-reads", "2023") track when, not what.
+_DATED_SHELF_RE = re.compile(r"^(?:read )?(?:in )?(?:19|20)\d\d(?: reads?| books?)?$")
+
+
+def _is_non_category_shelf(value: str) -> bool:
+    return value in NON_CATEGORY_SHELVES or bool(_DATED_SHELF_RE.match(value))
 
 MATCH_KINDS = ("shelf", "subject", "tag")
 MATCH_KIND_LABELS = {
@@ -490,11 +499,13 @@ def _purge_category(conn: sqlite3.Connection, category_id: int) -> None:
     conn.execute("DELETE FROM category_rules WHERE category_id = ?", (category_id,))
     conn.execute("DELETE FROM category_aliases WHERE category_id = ?", (category_id,))
     conn.execute("DELETE FROM category_exclusions WHERE category_id = ?", (category_id,))
-    # Open questions about this category go (the next run re-asks with a fresh
-    # guess); decided ones stay as history so a rejection still holds.
+    # Open questions and accepted mappings about this category go: the rule
+    # behind an accepted mapping was just deleted, so its shelf/subject is
+    # unmapped again and the next run re-asks with a fresh guess. Rejections
+    # stay as history so "don't map this shelf" still holds.
     conn.execute(
         "DELETE FROM category_suggestions WHERE category_id = ? "
-        "AND (kind = 'primary' OR status IN ('pending', 'superseded'))",
+        "AND (kind = 'primary' OR status IN ('pending', 'superseded', 'accepted'))",
         (category_id,),
     )
     conn.execute(
@@ -1029,9 +1040,12 @@ def categorize(conn: sqlite3.Connection, *, dry_run: bool = False) -> dict[str, 
                     (book["id"], category_id, rule_id, evidence),
                 )
                 assigned += 1
-            elif row["source"] == "rule" and row["rule_id"] != rule_id:
+            elif row["source"] == "derived" or (row["source"] == "rule" and row["rule_id"] != rule_id):
+                # A derived default that now has evidence of its own becomes a
+                # rule assignment (and keeps its role).
                 conn.execute(
-                    "UPDATE book_categories SET rule_id = ?, evidence = ? WHERE book_id = ? AND category_id = ?",
+                    "UPDATE book_categories SET source = 'rule', rule_id = ?, evidence = ? "
+                    "WHERE book_id = ? AND category_id = ?",
                     (rule_id, evidence, book["id"], category_id),
                 )
 
@@ -1063,20 +1077,29 @@ def _settle_primaries(
     """Keep each book's primary genre in line with its genres.
 
     A primary the user set or confirmed is final. One picked automatically
-    (source 'rule') is provisional:
+    (source 'rule' or 'derived') is provisional and re-decided on every run:
 
-    - one most-specific genre -> it becomes primary, including moving a
-      provisional "Science Fiction" down to a newly mapped "Space Opera";
-    - several competing genres -> a 'primary' suggestion goes to review
-      (confirming the provisional pick if there is one, else the best guess).
+    1. One most-specific genre -> it is primary (so a provisional "Science
+       Fiction" moves down to a newly mapped "Space Opera").
+    2. Several -> the user's own evidence wins: if exactly one competing genre
+       comes from their shelves, tags or hand edits (rather than Open Library
+       subjects), it is primary.
+    3. Otherwise, if the competitors share a genre ancestor, the deepest one is
+       primary ("Cyberpunk" + "Space Opera" -> "Science Fiction"). When the book
+       doesn't carry that ancestor, a 'derived' row is added for it, owned by
+       this function and removed as soon as it stops being the answer.
+    4. Otherwise a 'primary' question goes to review.
 
-    Rejected candidates are never proposed again for that book.
+    Rejected candidates are never picked or proposed again for that book, and
+    categories the user removed from a book are never derived back onto it.
     """
     genres: dict[int, list[sqlite3.Row]] = defaultdict(list)
     for row in conn.execute(
         """
-        SELECT bc.book_id, bc.category_id, bc.role, bc.source
-        FROM book_categories bc JOIN categories c ON c.id = bc.category_id
+        SELECT bc.book_id, bc.category_id, bc.role, bc.source, r.match_kind
+        FROM book_categories bc
+        JOIN categories c ON c.id = bc.category_id
+        LEFT JOIN category_rules r ON r.id = bc.rule_id
         WHERE c.facet = 'genre'
         """
     ):
@@ -1088,7 +1111,10 @@ def _settle_primaries(
         "SELECT book_id, category_id, status FROM category_suggestions WHERE kind = 'primary'"
     ):
         decided[row["book_id"]][row["category_id"]] = row["status"]
-
+    exclusions = {
+        (row["book_id"], row["category_id"])
+        for row in conn.execute("SELECT book_id, category_id FROM category_exclusions")
+    }
     popularity: dict[int, int] = defaultdict(int)
     for row in conn.execute("SELECT category_id, COUNT(*) AS n FROM book_categories GROUP BY category_id"):
         popularity[row["category_id"]] = row["n"]
@@ -1096,12 +1122,13 @@ def _settle_primaries(
     auto = suggested = 0
     for book_id, rows in genres.items():
         primary = next((row for row in rows if row["role"] == "primary"), None)
-        if primary is not None and primary["source"] != "rule":
+        derived = {row["category_id"] for row in rows if row["source"] == "derived"}
+        if primary is not None and primary["source"] not in ("rule", "derived"):
+            _drop_derived(conn, book_id, derived)
             continue
-        ids = {row["category_id"] for row in rows}
-        leaves = [cid for cid in ids if not any(taxonomy.is_ancestor(cid, other) for other in ids)]
+        real = [row for row in rows if row["source"] != "derived"]
+        ids = {row["category_id"] for row in real}
         states = decided.get(book_id, {})
-        candidates = [cid for cid in leaves if states.get(cid) != "rejected"]
         current = primary["category_id"] if primary is not None else None
         if current is not None and states.get(current) == "rejected":
             conn.execute(
@@ -1109,20 +1136,59 @@ def _settle_primaries(
                 (book_id, current),
             )
             current = None
+        leaves = [cid for cid in ids if not any(taxonomy.is_ancestor(cid, other) for other in ids)]
+        candidates = [cid for cid in leaves if states.get(cid) != "rejected"]
+        if not candidates:
+            _drop_derived(conn, book_id, derived - {current})
+            if current is not None:
+                _close_primary_questions(conn, book_id)
+            continue
 
-        if len(candidates) == 1 and len(leaves) == 1:
-            if current != candidates[0]:
-                _promote(conn, book_id, candidates[0])
+        mine = [
+            cid
+            for cid in candidates
+            if any(
+                row["category_id"] == cid and (row["source"] == "user" or row["match_kind"] in ("shelf", "tag"))
+                for row in real
+            )
+        ]
+        pick: int | None = None
+        basis: list[int] = []
+        if len(candidates) == 1:
+            pick = candidates[0]
+        elif len(mine) == 1:
+            pick = mine[0]
+        else:
+            basis = mine if len(mine) >= 2 else candidates
+            shared = _deepest_shared_ancestor(taxonomy, basis)
+            if shared is not None and states.get(shared) != "rejected" and (book_id, shared) not in exclusions:
+                pick = shared
+
+        if pick is not None:
+            if pick not in ids:
+                evidence = "shared parent of " + ", ".join(sorted(taxonomy.get(c).label for c in basis))
+                conn.execute(
+                    "UPDATE book_categories SET role = 'secondary' WHERE book_id = ? AND role = 'primary'",
+                    (book_id,),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO book_categories (book_id, category_id, role, source, evidence)
+                    VALUES (?, ?, 'primary', 'derived', ?)
+                    ON CONFLICT(book_id, category_id) DO UPDATE SET role = 'primary', evidence = excluded.evidence
+                    """,
+                    (book_id, pick, evidence),
+                )
+            elif current != pick:
+                _promote(conn, book_id, pick)
+            _drop_derived(conn, book_id, derived - {pick})
+            if current != pick:
                 auto += 1
             _close_primary_questions(conn, book_id)
             continue
-        if len(candidates) <= 1 and current is not None:
-            _close_primary_questions(conn, book_id)
-            continue
-        if not candidates:
-            continue
 
-        # Ambiguous: make sure exactly one live question is open.
+        # Genuinely different genres: make sure exactly one live question is open.
+        _drop_derived(conn, book_id, derived)
         pending = [cid for cid, status in states.items() if status == "pending"]
         for cid in pending:
             if cid not in candidates:
@@ -1135,14 +1201,13 @@ def _settle_primaries(
                 )
         if any(cid in candidates for cid in pending):
             continue
-        source_of = {row["category_id"]: row["source"] for row in rows}
         if current in candidates:
             best = current
         else:
             best = sorted(
                 candidates,
                 key=lambda cid: (
-                    source_of.get(cid) != "user",
+                    cid not in mine,
                     -taxonomy.depth(cid),
                     -popularity.get(cid, 0),
                     taxonomy.get(cid).label.lower(),
@@ -1161,6 +1226,27 @@ def _settle_primaries(
         )
         suggested += 1
     return auto, suggested
+
+
+def _deepest_shared_ancestor(taxonomy: Taxonomy, category_ids: list[int]) -> int | None:
+    """The deepest genre all of these sit under (never one of them), if any."""
+    lineages = [[node.id for node in taxonomy.lineage(cid)] for cid in category_ids]
+    shared: int | None = None
+    for level in zip(*lineages):
+        if len(set(level)) != 1:
+            break
+        shared = level[0]
+    if shared is None or shared in category_ids:
+        return None
+    return shared
+
+
+def _drop_derived(conn: sqlite3.Connection, book_id: int, category_ids: set[int]) -> None:
+    for category_id in category_ids:
+        conn.execute(
+            "DELETE FROM book_categories WHERE book_id = ? AND category_id = ? AND source = 'derived'",
+            (book_id, category_id),
+        )
 
 
 def _promote(conn: sqlite3.Connection, book_id: int, category_id: int) -> None:
@@ -1198,7 +1284,7 @@ def _guess_category(
         return exact[0], CONFIDENCE_EXACT[kind], None
     if kind != "shelf":
         return None  # subjects and tags only raise proposals on a clean match
-    if value in NON_CATEGORY_SHELVES:
+    if _is_non_category_shelf(value):
         return None
     tokens = value.split()
     partial: set[int] = set()
@@ -1328,6 +1414,8 @@ def _describe_suggestion(taxonomy: Taxonomy, row: sqlite3.Row) -> dict[str, Any]
         "book_id": row["book_id"],
         "goodreads_id": row["goodreads_id"],
         "category_id": row["category_id"],
+        "proposed_facet": row["proposed_facet"],
+        "proposed_label": row["proposed_label"],
         "confidence": row["confidence"],
         "book_count": row["book_count"],
         "evidence": row["evidence"],
@@ -1344,17 +1432,97 @@ def _get_suggestion(conn: sqlite3.Connection, suggestion_id: int) -> sqlite3.Row
     return row
 
 
+def _group_key(row: sqlite3.Row | dict[str, Any]) -> tuple:
+    """Mapping suggestions with the same target form one review card."""
+    if row["category_id"] is not None:
+        return ("category", row["category_id"])
+    return ("new", row["proposed_facet"] or "theme", normalize_term(row["proposed_label"] or ""))
+
+
+def suggestion_group(conn: sqlite3.Connection, suggestion_id: int) -> list[int]:
+    """Ids of the suggestions on the same card as this one (itself included).
+
+    A card is every mapping in the same state that points at the same target,
+    e.g. shelf "horror" + subject "Horror tales" -> Genre: Horror. A
+    primary-genre question is always a card of its own.
+    """
+    row = _get_suggestion(conn, suggestion_id)
+    if row["kind"] != "map":
+        return [suggestion_id]
+    key = _group_key(row)
+    siblings = conn.execute(
+        "SELECT id, category_id, proposed_facet, proposed_label FROM category_suggestions "
+        "WHERE kind = 'map' AND status = ?",
+        (row["status"],),
+    ).fetchall()
+    return sorted(sibling["id"] for sibling in siblings if _group_key(sibling) == key)
+
+
+def _signal_books(conn: sqlite3.Connection) -> dict[tuple[str, str], set[int]]:
+    """(match_kind, value) -> ids of the books carrying that evidence now."""
+    books: dict[tuple[str, str], set[int]] = defaultdict(set)
+    for book in conn.execute(
+        "SELECT id, exclusive_shelf, shelves_json, subjects_json, tags_json FROM books"
+    ):
+        for key in _book_signals(book):
+            books[key].add(book["id"])
+    return books
+
+
+def list_suggestion_cards(conn: sqlite3.Connection, *, status: str = "pending") -> list[dict[str, Any]]:
+    """Suggestions as review cards, highest-leverage first.
+
+    Mapping suggestions that share a target are one card whose ``book_count``
+    is the number of distinct books across its sources, so one decision covers
+    a shelf and every Open Library spelling of the same genre. Card ``id`` is
+    its highest-leverage member; any member's id addresses the whole card.
+    """
+    items = list_suggestions(conn, status=status)
+    signal_books = _signal_books(conn)
+    groups: dict[tuple, list[dict[str, Any]]] = defaultdict(list)
+    cards: list[dict[str, Any]] = []
+    for item in items:
+        if item["kind"] == "map":
+            groups[_group_key(item)].append(item)
+        else:
+            cards.append({**item, "members": [item]})
+    for members in groups.values():
+        members.sort(key=lambda m: -(m["book_count"] * m["confidence"]))
+        books: set[int] = set()
+        for member in members:
+            books |= signal_books.get((member["match_kind"], member["match_value"]), set())
+        lead = members[0]
+        cards.append(
+            {
+                **lead,
+                "book_count": len(books) or sum(m["book_count"] for m in members),
+                "confidence": max(m["confidence"] for m in members),
+                "members": members,
+            }
+        )
+    cards.sort(
+        key=lambda card: (
+            card["kind"] != "map",
+            -(card["book_count"] * card["confidence"]),
+            card["target"].lower() if card["kind"] == "map" else card["subject"].lower(),
+        )
+    )
+    return cards
+
+
 def accept_suggestion(
     conn: sqlite3.Connection,
     suggestion_id: int,
     *,
     as_category: str | None = None,
+    only: bool = False,
     actor: str = "cli",
 ) -> dict[str, Any]:
-    """Accept a suggestion, optionally redirecting it to another category.
+    """Accept a suggestion's card, optionally redirecting it to another category.
 
-    A mapping becomes a rule applied across the library straight away; a
-    primary-genre suggestion sets that book's primary genre.
+    Every mapping on the card becomes a rule applied across the library
+    straight away (``only`` limits it to this one source). A primary-genre
+    suggestion sets that book's primary genre.
     """
     row = _get_suggestion(conn, suggestion_id)
     if row["status"] != "pending":
@@ -1381,48 +1549,81 @@ def accept_suggestion(
             hint=f'Accept it with `--as "<category>"`, or `adso review {suggestion_id} --reject`.',
         )
 
-    conn.execute(
-        """
-        UPDATE category_suggestions
-        SET status = 'accepted', category_id = ?, decided_at = CURRENT_TIMESTAMP, decided_by = ?
-        WHERE id = ?
-        """,
-        (category_id, actor, suggestion_id),
-    )
     if row["kind"] == "primary":
+        _mark(conn, [suggestion_id], "accepted", actor, category_id=category_id)
         _set_primary(conn, row["book_id"], category_id)
         conn.commit()
-        return {"kind": "primary", "category": Taxonomy(conn).display(category_id), "books": 1}
+        return {"kind": "primary", "category": Taxonomy(conn).display(category_id), "books": 1, "sources": 1}
 
-    rule_id = _insert_rule(conn, row["match_kind"], row["match_value"], category_id, actor=actor)
+    members = [suggestion_id] if only else suggestion_group(conn, suggestion_id)
+    _mark(conn, members, "accepted", actor, category_id=category_id)
+    rule_ids = [
+        _insert_rule(conn, member["match_kind"], member["match_value"], category_id, actor=actor)
+        for member in (_get_suggestion(conn, member_id) for member_id in members)
+    ]
     conn.commit()
     run = categorize(conn)
-    books = conn.execute("SELECT COUNT(*) FROM book_categories WHERE rule_id = ?", (rule_id,)).fetchone()[0]
-    return {"kind": "map", "category": Taxonomy(conn).display(category_id), "books": books, "run": run}
+    placeholders = ", ".join("?" for _ in rule_ids)
+    books = conn.execute(
+        f"SELECT COUNT(DISTINCT book_id) FROM book_categories WHERE rule_id IN ({placeholders})",
+        rule_ids,
+    ).fetchone()[0]
+    return {
+        "kind": "map",
+        "category": Taxonomy(conn).display(category_id),
+        "books": books,
+        "sources": len(members),
+        "run": run,
+    }
 
 
-def reject_suggestion(conn: sqlite3.Connection, suggestion_id: int, *, actor: str = "cli") -> dict[str, Any]:
+def _mark(
+    conn: sqlite3.Connection,
+    suggestion_ids: list[int],
+    status: str,
+    actor: str | None,
+    *,
+    category_id: int | None = None,
+) -> None:
+    for suggestion_id in suggestion_ids:
+        if status == "pending":
+            conn.execute(
+                "UPDATE category_suggestions SET status = 'pending', decided_at = NULL, decided_by = NULL "
+                "WHERE id = ?",
+                (suggestion_id,),
+            )
+            continue
+        conn.execute(
+            """
+            UPDATE category_suggestions
+            SET status = ?, category_id = COALESCE(?, category_id),
+                decided_at = CURRENT_TIMESTAMP, decided_by = ?
+            WHERE id = ?
+            """,
+            (status, category_id, actor, suggestion_id),
+        )
+
+
+def reject_suggestion(
+    conn: sqlite3.Connection, suggestion_id: int, *, only: bool = False, actor: str = "cli"
+) -> dict[str, Any]:
+    """Reject a suggestion's card (or with ``only``, just this source)."""
     row = _get_suggestion(conn, suggestion_id)
     if row["status"] != "pending":
         raise CategoryError(f"Suggestion {suggestion_id} is already {row['status']}")
-    conn.execute(
-        """
-        UPDATE category_suggestions
-        SET status = 'rejected', decided_at = CURRENT_TIMESTAMP, decided_by = ?
-        WHERE id = ?
-        """,
-        (actor, suggestion_id),
-    )
+    members = [suggestion_id] if only else suggestion_group(conn, suggestion_id)
+    _mark(conn, members, "rejected", actor)
     conn.commit()
     if row["kind"] == "primary":
-        # The next-best candidate (if any) becomes the new question.
+        # The next-best candidate (if any) becomes the new pick or question.
         _settle_primaries(conn, Taxonomy(conn), book_ids={row["book_id"]})
         conn.commit()
-    return _describe_suggestion(Taxonomy(conn), _get_suggestion_with_book(conn, suggestion_id))
+    item = _describe_suggestion(Taxonomy(conn), _get_suggestion_with_book(conn, suggestion_id))
+    return {**item, "sources": len(members)}
 
 
-def reopen_suggestion(conn: sqlite3.Connection, suggestion_id: int) -> dict[str, Any]:
-    """Return a rejected or superseded suggestion to the queue.
+def reopen_suggestion(conn: sqlite3.Connection, suggestion_id: int, *, only: bool = False) -> dict[str, Any]:
+    """Return a rejected or superseded suggestion's card to the queue.
 
     Accepted mappings are undone with `adso taxonomy unmap` instead, which also
     removes the assignments the rule made.
@@ -1433,12 +1634,11 @@ def reopen_suggestion(conn: sqlite3.Connection, suggestion_id: int) -> dict[str,
             f"Suggestion {suggestion_id} was accepted",
             hint="Undo a mapping with `adso taxonomy rules` and `adso taxonomy unmap RULE_ID`.",
         )
-    conn.execute(
-        "UPDATE category_suggestions SET status = 'pending', decided_at = NULL, decided_by = NULL WHERE id = ?",
-        (suggestion_id,),
-    )
+    members = [suggestion_id] if only else suggestion_group(conn, suggestion_id)
+    _mark(conn, members, "pending", None)
     conn.commit()
-    return _describe_suggestion(Taxonomy(conn), _get_suggestion_with_book(conn, suggestion_id))
+    item = _describe_suggestion(Taxonomy(conn), _get_suggestion_with_book(conn, suggestion_id))
+    return {**item, "sources": len(members)}
 
 
 def _get_suggestion_with_book(conn: sqlite3.Connection, suggestion_id: int) -> sqlite3.Row:
