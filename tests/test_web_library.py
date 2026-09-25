@@ -264,6 +264,44 @@ class CoverThumbnailTests(unittest.TestCase):
             covers.cover_thumbnail(self.src)
             self.assertEqual(len(calls), 2)
 
+    def test_cover_already_small_is_served_as_is(self) -> None:
+        from unittest.mock import patch
+
+        from adso import covers
+
+        small = Path(self.tmp.name) / "7.png"
+        small.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\x0dIHDR" + struct.pack(">II", 200, 300) + b"\x08\x02\x00\x00\x00")
+        calls: list = []
+        with patch.object(covers, "_pillow_thumbnail", return_value=False), \
+             patch.object(covers, "_sips_thumbnail", side_effect=self._fake(calls)):
+            self.assertIsNone(covers.cover_thumbnail(small))  # 300px <= 360px: no scaling
+        self.assertEqual(calls, [])
+
+    def test_thumbnail_no_smaller_than_cover_is_skipped_and_remembered(self) -> None:
+        import os
+        from unittest.mock import patch
+
+        from adso import covers
+
+        calls: list = []
+
+        def bigger(src, dest, max_px):
+            calls.append(src)
+            Path(dest).write_bytes(b"x" * 100)  # the 15-byte "cover" compresses better
+            return True
+
+        thumbs = Path(self.tmp.name) / ".thumbs" / "360"
+        with patch.object(covers, "_pillow_thumbnail", return_value=False), \
+             patch.object(covers, "_sips_thumbnail", side_effect=bigger):
+            self.assertIsNone(covers.cover_thumbnail(self.src))
+            self.assertEqual(sorted(p.name for p in thumbs.iterdir()), ["42-png.jpg.skip"])
+            self.assertIsNone(covers.cover_thumbnail(self.src))
+            self.assertEqual(len(calls), 1)  # the verdict is cached
+            os.utime(self.src, None)  # a new cover gets a fresh attempt
+            os.utime(thumbs / "42-png.jpg.skip", (2_000, 2_000))
+            covers.cover_thumbnail(self.src)
+            self.assertEqual(len(calls), 2)
+
     def test_missing_cover_returns_none(self) -> None:
         from adso.covers import cover_thumbnail
 
