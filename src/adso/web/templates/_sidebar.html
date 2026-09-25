@@ -4,6 +4,7 @@
    boosted by #browse. Expects `lib`, `p`. #}
 <aside class="side" id="side" aria-label="Shelves and tags">
   <a href="{{ p.query(shelf='', smart='', tag='', category='', gr_shelf='', series='', book='') }}" class="nav {{ 'on' if not (p.shelf or p.smart or p.tag or p.category or p.gr_shelf or p.series) }}">Library<span class="n">{{ lib.library_count }}</span></a>
+  <a href="/next" class="nav" hx-boost="false">What to read next<span class="n">→</span></a>
 
   <h5><i>01</i>Shelves</h5>
   {% for f in lib.shelves %}

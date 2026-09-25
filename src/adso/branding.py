@@ -38,6 +38,14 @@ COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ],
     ),
     (
+        "Discover",
+        [
+            ("next", "What to read next, with reasons"),
+            ("related", "Books most like one book"),
+            ("insights", "Your reading by genre"),
+        ],
+    ),
+    (
         "Organise",
         [
             ("categorize", "Apply category rules & raise suggestions"),

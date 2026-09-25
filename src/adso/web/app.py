@@ -31,6 +31,7 @@ from .. import db
 from .. import dedupe as dedupe_service
 from .. import exports as exports_service
 from .. import metadata as metadata_service
+from .. import recommend as recommend_service
 from .. import reports as reports_service
 from .. import sync as sync_service
 from ..catalogue import (
@@ -396,13 +397,13 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
                 if b["goodreads_id"] != goodreads_id
             ]
             by_author = [b for b in by_author if b not in in_series]
-        also_tagged: list[dict] = []
-        if book["tags"]:
-            seen = {goodreads_id, *(b["goodreads_id"] for b in by_author), *(b["goodreads_id"] for b in in_series)}
-            also_tagged = [
-                b for b in sort_books(list_books(conn, BookFilters(tag=book["tags"][0])), "added")
-                if b["goodreads_id"] not in seen
-            ]
+        # Related: shared genres, themes, tags and subjects (series and author
+        # already have their own strips).
+        seen = {goodreads_id, *(b["goodreads_id"] for b in by_author), *(b["goodreads_id"] for b in in_series)}
+        related = [
+            r for r in recommend_service.related_books(conn, goodreads_id, limit=24)
+            if r["goodreads_id"] not in seen
+        ]
         return templates.TemplateResponse(
             request,
             "book_detail.html",
@@ -410,7 +411,7 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
                 "book": book,
                 "all_tags": distinct_tags(conn),
                 "by_author": sort_books(by_author, "year")[:12],
-                "also_tagged": also_tagged[:12],
+                "related": related[:12],
                 "in_series": in_series[:24],
                 **cat_ctx,
                 "shelf_label": SHELF_LABELS.get(book.get("exclusive_shelf") or "", book.get("reading_status") or ""),
@@ -989,6 +990,57 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
             return f"Removed the rule for {rule['match_label']} “{rule['match_value']}” and its {rule['books']} assignment(s)."
 
         return _taxonomy_action(action, "#rules")
+
+    def _next_filters(category: str | None, owned: str | None, max_pages: str | None) -> dict:
+        pages = int(max_pages) if (max_pages or "").strip().isdigit() else None
+        return {"category": (category or "").strip() or None, "owned": bool(owned), "max_pages": pages}
+
+    @app.get("/next", response_class=HTMLResponse)
+    def next_page(
+        request: Request,
+        conn: sqlite3.Connection = Depends(get_conn),
+        category: str | None = Query(None),
+        owned: str | None = Query(None),
+        max_pages: str | None = Query(None),
+    ) -> HTMLResponse:
+        f = _next_filters(category, owned, max_pages)
+        error = None
+        try:
+            picks = recommend_service.next_reads(
+                conn, limit=12, category=f["category"], owned_only=f["owned"], max_pages=f["max_pages"]
+            )
+        except categorize_service.CategoryError as exc:
+            picks, error = [], str(exc)
+        return templates.TemplateResponse(
+            request,
+            "next.html",
+            {
+                "picks": picks,
+                "paths": recommend_service.explore_paths(conn),
+                "insights": recommend_service.insights(conn),
+                "choices": categorize_service.category_choices(conn),
+                "f": f,
+                "error": error,
+                **_nav_ctx(conn),
+            },
+        )
+
+    @app.get("/api/next")
+    def api_next(
+        conn: sqlite3.Connection = Depends(get_conn),
+        category: str | None = Query(None),
+        owned: str | None = Query(None),
+        max_pages: str | None = Query(None),
+        limit: int = Query(10, ge=1, le=50),
+    ) -> dict:
+        f = _next_filters(category, owned, max_pages)
+        try:
+            picks = recommend_service.next_reads(
+                conn, limit=limit, category=f["category"], owned_only=f["owned"], max_pages=f["max_pages"]
+            )
+        except categorize_service.CategoryError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        return {"picks": picks, "paths": recommend_service.explore_paths(conn)}
 
     @app.get("/api/taxonomy")
     def api_taxonomy(conn: sqlite3.Connection = Depends(get_conn)) -> dict:

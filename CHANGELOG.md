@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **What to read next** (phase 4): `adso next`, `adso related`, `adso insights`,
+  a web **Next up** page, a **Related** strip on book pages, and MCP tools
+  (`recommend_next`, `explore_paths`, `related_books`, `reading_insights`).
+  - Your to-read shelf is ranked against a taste profile built from your own
+    ratings (DNFs count against) across genres, themes, tags, subjects and
+    authors. Rare and specific features weigh more, and a genre needs a few
+    books behind it before it counts fully.
+  - Series order: the next unread book moves up, and skipping ahead waits.
+  - Owned books and strong community ratings get a nudge, and a variety pass
+    keeps one genre from filling the list.
+  - Every pick carries plain-language reasons.
+  - "New directions" suggests unread neighbours of genres you love. Insights
+    show reading by genre and where your pile leans. Book pages replace
+    "Also tagged" with "Related".
 - **Categories in the web UI, MCP and exports** (phase 2).
   - Library sidebar: a genre tree with roll-up counts, and themes. The library
     also filters by series, in reading order.

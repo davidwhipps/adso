@@ -13,6 +13,7 @@ from . import config as config_module
 from . import conflicts as conflicts_service
 from . import dedupe as dedupe_service
 from . import doctor as doctor_module
+from . import recommend as recommend_service
 from .catalogue import BookFilters, get_book, list_books, search_books
 from .config import DEFAULT_DB, ResolvedConfig
 from .covers import CoversError, fetch_covers, set_manual_cover
@@ -207,6 +208,32 @@ def _dispatch(args, parser) -> int:
 
         if args.command == "taxonomy":
             return _run_taxonomy(conn, args)
+
+        if args.command == "next":
+            if args.explore:
+                print(_format_paths(recommend_service.explore_paths(conn, limit=args.limit or 4)))
+                return 0
+            picks = recommend_service.next_reads(
+                conn,
+                limit=args.limit or 10,
+                category=args.category,
+                owned_only=args.owned,
+                max_pages=args.max_pages,
+            )
+            print(_format_picks(picks, empty="Nothing on your to-read shelf matches."))
+            return 0
+
+        if args.command == "related":
+            try:
+                related = recommend_service.related_books(conn, args.goodreads_id, limit=args.limit or 10)
+            except ValueError as exc:
+                raise AdsoError(str(exc), hint="Run `adso search <title>` to find the ID.") from exc
+            print(_format_picks(related, empty="No related books found.", show_shelf=True))
+            return 0
+
+        if args.command == "insights":
+            print(_format_insights(recommend_service.insights(conn)))
+            return 0
 
         if args.command == "conflicts":
             groups = conflicts_service.list_open_conflicts(conn)
@@ -847,6 +874,29 @@ def _build_parser() -> argparse.ArgumentParser:
         "--all", action="store_true", help="Also list decided suggestions (accepted and rejected)"
     )
 
+    next_parser = subparsers.add_parser(
+        "next",
+        help="What to read next: your to-read pile ranked by your own ratings",
+        description=(
+            "Rank your to-read shelf by how well each book matches what you rate "
+            "highly (genres, themes, tags, subjects, authors), the next unread book "
+            "in series you're enjoying, and books you own, with the reasons for "
+            "each. --explore suggests genres next to ones you love that you've "
+            "barely read."
+        ),
+    )
+    next_parser.add_argument("--limit", type=int, help="How many picks (default 10)")
+    next_parser.add_argument("--category", help="Only this category, e.g. 'Fantasy' (includes subgenres)")
+    next_parser.add_argument("--owned", action="store_true", help="Only books you own")
+    next_parser.add_argument("--max-pages", type=int, metavar="N", help="Only books up to N pages")
+    next_parser.add_argument("--explore", action="store_true", help="Suggest new directions instead")
+
+    related_parser = subparsers.add_parser("related", help="Books most like one book")
+    related_parser.add_argument("goodreads_id", help="Goodreads Book ID")
+    related_parser.add_argument("--limit", type=int, help="How many (default 10)")
+
+    subparsers.add_parser("insights", help="Your reading by genre, and where your to-read pile leans")
+
     taxonomy_parser = subparsers.add_parser(
         "taxonomy", help="Manage categories, aliases and shelf/subject mapping rules"
     )
@@ -1368,6 +1418,73 @@ def _print_run_followups(run: dict[str, int]) -> None:
         print(f"{run['primaries_set']} book(s) got a primary genre.")
     if run.get("pending"):
         print(f"{run['pending']} suggestion(s) still open — `adso review`.")
+
+
+_SHELF_SHORT = {"read": "read", "to-read": "to read", "currently-reading": "reading", "did-not-finish": "DNF"}
+
+
+def _format_picks(picks: list[dict[str, object]], *, empty: str, show_shelf: bool = False) -> str:
+    if not picks:
+        return empty
+    lines: list[str] = []
+    for index, pick in enumerate(picks, 1):
+        author = f" — {pick['author']}" if pick.get("author") else ""
+        extra = []
+        if show_shelf and pick.get("shelf"):
+            extra.append(_SHELF_SHORT.get(str(pick["shelf"]), str(pick["shelf"])))
+        if pick.get("rating"):
+            extra.append(f"{pick['rating']}★")
+        suffix = f"  [{', '.join(extra)}]" if extra else ""
+        lines.append(f"{index:>2}. {pick['title']}{author}  (Goodreads ID {pick['goodreads_id']}){suffix}")
+        for reason in pick.get("reasons") or []:  # type: ignore[union-attr]
+            lines.append(f"      · {reason}")
+    return "\n".join(lines)
+
+
+def _format_paths(paths: list[dict[str, object]]) -> str:
+    if not paths:
+        return (
+            "No new directions yet. They appear once you've rated a few books in a genre and "
+            "have books in a neighbouring genre on your to-read shelf."
+        )
+    lines: list[str] = []
+    for path in paths:
+        if lines:
+            lines.append("")
+        lines.append(f"Try {path['genre']}")
+        lines.append(f"  {path['because']}")
+        for book in path["books"]:  # type: ignore[union-attr]
+            author = f" — {book['author']}" if book.get("author") else ""
+            lines.append(f"  · {book['title']}{author}  (Goodreads ID {book['goodreads_id']})")
+    return "\n".join(lines)
+
+
+def _format_insights(data: dict[str, object]) -> str:
+    avg = data.get("average_rating")
+    lines = [
+        f"Read {data['read']} · did not finish {data['dnf']} · to read {data['to_read']}"
+        + (f" · average rating {avg}★" if avg else ""),
+    ]
+    if data.get("unrated_read"):
+        lines.append(f"{data['unrated_read']} read books are unrated; rating them sharpens `adso next`.")
+    if data.get("uncategorised"):
+        lines.append(f"{data['uncategorised']} books have no category yet; `adso review` helps.")
+    genres = data.get("genres") or []
+    if genres:
+        lines += ["", f"{'Genre':<26}{'read':>6}{'avg':>7}{'DNF':>7}{'to read':>9}"]
+        for row in genres:  # type: ignore[union-attr]
+            avg_text = f"{row['avg_rating']:.1f}★" if row["avg_rating"] is not None else "—"
+            dnf_text = f"{int(row['dnf_rate'] * 100)}%" if row["dnf_rate"] is not None else "—"
+            lines.append(f"{row['genre'][:25]:<26}{row['read']:>6}{avg_text:>7}{dnf_text:>7}{row['to_read']:>9}")
+    notes = data.get("notes") or []
+    if notes:
+        lines.append("")
+        lines += [f"· {note}" for note in notes]  # type: ignore[union-attr]
+    years = data.get("read_by_year") or {}
+    if years:
+        lines.append("")
+        lines.append("Read per year: " + ", ".join(f"{y} {n}" for y, n in years.items()))  # type: ignore[union-attr]
+    return "\n".join(lines)
 
 
 def _format_categorize_result(result: dict[str, int], *, dry_run: bool) -> str:

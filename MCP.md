@@ -119,10 +119,13 @@ Restart Claude Desktop to pick it up.
 
 ## What the agent can (and can't) do
 
-**Twelve tools.** Six reads — search the catalogue (by shelf, tag, format,
-rating, author, category, Goodreads shelf or series), fetch a book, summarise
-your library, list the filter vocabulary, show your category tree, and list the
-open categorisation suggestions — and six curated writes: add tags, remove tags,
+**Sixteen tools.** Ten reads — **what to read next** (your to-read shelf
+ranked against your own ratings, with the reasons for each pick), **new
+directions** to explore, **related books**, **reading insights** by genre,
+search the catalogue (by shelf, tag, format, rating, author, category, Goodreads
+shelf or series), fetch a book, summarise your library, list the filter
+vocabulary, show your category tree, and list the open categorisation
+suggestions — and six curated writes: add tags, remove tags,
 set a book's owned format, record a loan, **suggest categories** for a book, and
 **decide a categorisation suggestion** when you ask it to. Every book the agent
 sees carries its primary genre, categories and series.

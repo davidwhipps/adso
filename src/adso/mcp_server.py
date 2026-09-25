@@ -28,7 +28,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
-from . import catalogue, db
+from . import catalogue, db, recommend
 from . import categorize as cat
 
 SERVER_NAME = "adso"
@@ -261,6 +261,56 @@ def list_category_suggestions(conn: sqlite3.Connection, limit: int | None = None
     }
 
 
+# --- Recommendations (read-only) -----------------------------------------------
+
+_PICK_FIELDS = (
+    "goodreads_id", "title", "author", "shelf", "rating", "format", "pages",
+    "primary_genre", "series", "reasons",
+)
+
+
+def _picks(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{field: card.get(field) for field in _PICK_FIELDS} for card in cards]
+
+
+def recommend_next(
+    conn: sqlite3.Connection,
+    limit: int | None = None,
+    category: str | None = None,
+    owned_only: bool = False,
+    max_pages: int | None = None,
+) -> dict[str, Any]:
+    """The to-read pile ranked against the user's own ratings, with reasons."""
+    try:
+        picks = recommend.next_reads(
+            conn, limit=min(_clamp_limit(limit or 10), 50), category=(category or "").strip() or None,
+            owned_only=owned_only, max_pages=max_pages,
+        )
+    except cat.CategoryError as exc:
+        raise ValueError(f"{exc} (see list_taxonomy for valid categories)") from exc
+    return {"picks": _picks(picks)}
+
+
+def explore_paths(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Genres next to ones the user loves that they've barely read, with books to start."""
+    return {
+        "paths": [
+            {"genre": p["genre"], "because": p["because"], "books": _picks(p["books"])}
+            for p in recommend.explore_paths(conn)
+        ]
+    }
+
+
+def related_books(conn: sqlite3.Connection, goodreads_id: str, limit: int | None = None) -> dict[str, Any]:
+    """Books most like one book, with why."""
+    return {"related": _picks(recommend.related_books(conn, goodreads_id, limit=min(_clamp_limit(limit or 10), 50)))}
+
+
+def reading_insights(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Reading by genre (read, rating, DNF rate, to-read) and where the pile leans."""
+    return recommend.insights(conn)
+
+
 # --- Write tools (curated; LOCAL_FIELDS and category review only) ------------
 
 
@@ -438,6 +488,39 @@ def build_server(db_path: str) -> Any:
         """List the valid shelves, tags, formats, categories in use, custom
         Goodreads shelves and series to filter searches by."""
         return _run(list_facets)
+
+    @mcp.tool()
+    def recommend_next_tool(
+        limit: int | None = None,
+        category: str | None = None,
+        owned_only: bool = False,
+        max_pages: int | None = None,
+    ) -> dict:
+        """What should I read next? Ranks the user's to-read shelf against their
+        own ratings (genres, themes, tags, subjects, authors), series order and
+        what they own, and gives the reasons for each pick. Share the reasons
+        with the user. Optional filters: a category (e.g. "Fantasy"), only owned
+        books, or a maximum page count."""
+        return _run(recommend_next, limit, category, owned_only, max_pages)
+
+    @mcp.tool()
+    def explore_paths_tool() -> dict:
+        """Suggest new reading directions: genres next to ones the user rates
+        highly that they've barely read, with books from their to-read shelf."""
+        return _run(explore_paths)
+
+    @mcp.tool()
+    def related_books_tool(goodreads_id: str, limit: int | None = None) -> dict:
+        """Books in the catalogue most like one book (same series, author,
+        genres, tags, subjects), with why."""
+        return _run(related_books, goodreads_id, limit)
+
+    @mcp.tool()
+    def reading_insights_tool() -> dict:
+        """The user's reading by genre: books read, average rating, DNF rate,
+        to-read count, and notes where the to-read pile leans away from what
+        they enjoy."""
+        return _run(reading_insights)
 
     @mcp.tool()
     def list_taxonomy_tool() -> dict:

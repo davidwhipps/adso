@@ -72,13 +72,13 @@
     </div>
   </div>
 
-  {% if in_series or by_author or also_tagged %}
+  {% if in_series or by_author or related %}
   <div class="also">
-    {% for heading, em, items in [("In the series", bc.series.name if bc.series else "", in_series), ("More by", book.author, by_author), ("Also tagged", "#" ~ (book.tags[0] if book.tags else ""), also_tagged)] if items %}
+    {% for heading, em, items in [("In the series", bc.series.name if bc.series else "", in_series), ("More by", book.author, by_author), ("Related", "", related)] if items %}
     <h3>{{ heading }} <em>{{ em }}</em><span class="mono">{{ items | length }}</span></h3>
     <div class="strip">
       {% for b in items %}
-      <a class="s-it" href="/book/{{ b.goodreads_id }}" style="--d: {{ loop.index0 * 30 }}ms">
+      <a class="s-it" href="/book/{{ b.goodreads_id }}" style="--d: {{ loop.index0 * 30 }}ms"{% if b.reasons %} title="{{ b.reasons | join(' · ') }}"{% endif %}>
         <div class="cv"><div class="fb"><span>{{ b.title }}</span></div><img src="{{ b.cover_url }}?size=thumb" alt="" loading="lazy" decoding="async"></div>
         <div class="t">{{ b.title }}</div>
       </a>
