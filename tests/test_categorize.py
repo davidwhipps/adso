@@ -325,25 +325,33 @@ class PrimaryGenreTests(CategorizeTestCase):
         self.assertEqual(self.primary("1"), "Science Fiction > Space Opera")
         self.assertEqual(self.primary_questions(), [])
 
-    def test_competing_genres_raise_one_question(self):
+    def test_competing_genres_are_picked_not_asked(self):
         self.accept("mystery")
         self.accept("historical fiction")
-        questions = self.primary_questions()
-        self.assertEqual(len(questions), 1)
-        self.assertEqual(questions[0]["target"], "Genre: Crime & Mystery")
-        self.assertIn("Historical Fiction", questions[0]["evidence"])
-        cat.categorize(self.conn)
-        self.assertEqual(len(self.primary_questions()), 1)
-
-    def test_rejecting_the_pick_leaves_the_other_candidate(self):
-        self.accept("mystery")
-        self.accept("historical fiction")
-        cat.reject_suggestion(self.conn, self.primary_questions()[0]["id"])
-        # Only one candidate is left, so it becomes the (provisional) primary.
-        self.assertEqual(self.primary("4"), "Historical Fiction")
+        # The pick already made stays put; nothing goes to review.
+        self.assertEqual(self.primary("4"), "Crime & Mystery")
         self.assertEqual(self.primary_questions(), [])
         cat.categorize(self.conn)
+        self.assertEqual(self.primary("4"), "Crime & Mystery")
+        cat.set_primary_genre(self.conn, self.book_id("4"), "Historical Fiction")
+        cat.categorize(self.conn)
         self.assertEqual(self.primary("4"), "Historical Fiction")
+
+    def test_pick_prefers_the_books_side_then_the_rarer_genre(self):
+        self.sync([
+            *LIBRARY,
+            book("6", "Wolf Hall", "read, fiction, history, historical-fiction"),
+            book("7", "SPQR", "read, history"),
+        ], name="more.csv")
+        for shelf, target in (("fiction", "form:Fiction"), ("history", "History"),
+                              ("historical-fiction", "Historical Fiction")):
+            cat._insert_rule(self.conn, "shelf", cat.normalize_term(shelf), cat.Taxonomy(self.conn).resolve(target).id,
+                             actor="cli")
+        self.conn.commit()
+        cat.categorize(self.conn)
+        self.assertEqual(self.primary("6"), "Historical Fiction")  # a novel leads with its fiction genre
+        self.assertEqual(self.primary("7"), "History")
+        self.assertEqual(self.primary_questions(), [])
 
     def test_user_primary_is_final(self):
         self.accept("sci fi")
@@ -476,22 +484,22 @@ class PrimaryDefaultTests(CategorizeTestCase):
         self.assertEqual(detail["primary"]["path"], "Science Fiction")
         self.assertEqual(detail["primary"]["source"], "rule")
 
-    def test_unrelated_genres_still_ask(self):
+    def test_unrelated_genres_are_picked_without_asking(self):
         self.sync([book("1", "The Name of the Rose", "read, mystery, historical-fiction")])
         self.map_all()
-        # The first genre mapped stays as the provisional pick; one question confirms it.
-        questions = self.questions()
-        self.assertEqual(len(questions), 1)
-        self.assertEqual(f"Genre: {self.primary('1')}", questions[0]["target"])
+        self.assertIn(self.primary("1"), ("Crime & Mystery", "Historical Fiction"))
+        self.assertEqual(self.questions(), [])
 
     def test_user_primary_and_removals_are_respected(self):
         self.sync([book("1", "Neuromancer in Space", "read, cyberpunk, space-opera")])
         self.map_all()
         book_id = self.book_id("1")
         cat.remove_book_category(self.conn, book_id, "Science Fiction")
-        # Removing the derived default: it is not derived back, so the book asks.
-        self.assertIsNone(self.primary("1"))
-        self.assertEqual(len(self.questions()), 1)
+        # Removing the derived default: it is not derived back; one of the
+        # subgenres is picked instead, without a question.
+        cat.categorize(self.conn)
+        self.assertIn(self.primary("1"), ("Science Fiction > Cyberpunk", "Science Fiction > Space Opera"))
+        self.assertEqual(self.questions(), [])
         cat.set_primary_genre(self.conn, book_id, "Space Opera")
         cat.categorize(self.conn)
         self.assertEqual(self.primary("1"), "Science Fiction > Space Opera")
@@ -557,28 +565,17 @@ class FictionGuardTests(CategorizeTestCase):
             if card["target"] in ("Form: Fiction", "Genre: History"):
                 cat.accept_suggestion(self.conn, card["id"])
 
-    def question(self) -> dict:
-        return next(c for c in cat.list_suggestion_cards(self.conn) if c["kind"] == "assign")
-
-    def test_novels_are_asked_about_not_filed(self):
+    def test_novels_stay_out_without_a_question(self):
         self.assertEqual(self.paths("2"), ["History"])  # nonfiction: filed directly
         self.assertEqual(self.paths("3"), ["History"])  # your own shelf says so
         self.assertEqual(self.paths("1"), [])
         self.assertEqual(self.paths("4"), [])
-        card = self.question()
-        self.assertEqual(card["target"], "Genre: History")
-        self.assertEqual(sorted(m["book_id"] for m in card["members"]), [self.book_id("1"), self.book_id("4")])
-
-    def test_answers_are_remembered(self):
-        card = self.question()
-        keep = next(m for m in card["members"] if m["book_id"] == self.book_id("4"))
-        cat.reject_suggestion(self.conn, keep["id"], only=True)
-        cat.accept_suggestion(self.conn, self.question()["id"])
-        self.assertEqual(self.paths("1"), ["History"])
-        self.assertEqual(self.paths("4"), [])
-        cat.categorize(self.conn)
-        self.assertEqual(self.paths("4"), [])
         self.assertFalse([c for c in cat.list_suggestion_cards(self.conn) if c["kind"] == "assign"])
+
+    def test_adding_it_by_hand_sticks(self):
+        cat.add_book_category(self.conn, self.book_id("1"), "History")
+        cat.categorize(self.conn)
+        self.assertEqual(self.paths("1"), ["History"])
 
 
 class AliasAndSeedTests(CategorizeTestCase):

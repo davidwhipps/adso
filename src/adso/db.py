@@ -566,6 +566,14 @@ def _migrate_categories(conn: sqlite3.Connection) -> None:
         """
     )
     seed_taxonomy(conn)
+    # Lead genres and "is this novel really History?" are decided
+    # automatically now; questions earlier versions raised are withdrawn.
+    conn.execute(
+        """
+        UPDATE category_suggestions SET status = 'superseded', decided_at = CURRENT_TIMESTAMP
+        WHERE status = 'pending' AND (kind = 'primary' OR (kind = 'assign' AND proposed_by = 'adso'))
+        """
+    )
     # Era comes from the publication year; mapping rules into it (possible
     # briefly after era arrived) are dropped with what they assigned, and
     # the next categorisation run fills eras in from the year again.

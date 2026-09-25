@@ -1212,7 +1212,6 @@ def categorize(conn: sqlite3.Connection, *, dry_run: bool = False) -> dict[str, 
 
     assigned = removed = tagged = 0
     unmatched: dict[tuple[str, str], dict[str, Any]] = {}
-    questions: dict[tuple[int, int], str] = {}
     for book in books:
         desired: dict[int, tuple[int, str]] = {}
         kinds: dict[int, set[str]] = defaultdict(set)
@@ -1242,12 +1241,12 @@ def categorize(conn: sqlite3.Connection, *, dry_run: bool = False) -> dict[str, 
         assigned += era_added
         removed += era_removed
         # A novel isn't History just because Open Library says "history": a
-        # nonfiction genre that only subjects support becomes a question.
+        # nonfiction genre that only subjects support stays off it (the user
+        # can still add it by hand).
         chosen = set(desired) | {cid for cid, row in existing.items() if row["source"] != "rule"}
         if fiction_id in chosen and nonfiction_form_id not in chosen:
             for category_id in [c for c in desired if c in nonfiction and kinds[c] <= {"subject"}]:
                 if category_id not in existing or existing[category_id]["source"] == "rule":
-                    questions[(book["id"], category_id)] = desired[category_id][1]
                     del desired[category_id]
 
         if new_tags:
@@ -1287,7 +1286,7 @@ def categorize(conn: sqlite3.Connection, *, dry_run: bool = False) -> dict[str, 
                     (rule_id, evidence, book["id"], category_id),
                 )
 
-    fiction_questions = _raise_fiction_questions(conn, questions)
+    _withdraw_fiction_questions(conn)
     primaries_set, primaries_suggested = _settle_primaries(conn, taxonomy)
     proposals = _propose_mappings(conn, taxonomy, unmatched)
 
@@ -1305,53 +1304,19 @@ def categorize(conn: sqlite3.Connection, *, dry_run: bool = False) -> dict[str, 
         "tagged": tagged,
         "series": series_changed,
         "primaries_set": primaries_set,
-        "primaries_suggested": primaries_suggested + fiction_questions,
+        "primaries_suggested": primaries_suggested,
         "new_proposals": proposals,
         "pending": pending,
     }
 
 
-def _raise_fiction_questions(conn: sqlite3.Connection, questions: dict[tuple[int, int], str]) -> int:
-    """Ask about nonfiction genres that only Open Library puts on a novel.
-
-    One 'assign' suggestion per book, grouped per genre on the review card.
-    Decided ones stay decided; ones whose situation changed are withdrawn.
-    """
-    existing = {
-        (row["book_id"], row["category_id"]): row
-        for row in conn.execute(
-            "SELECT id, book_id, category_id, status FROM category_suggestions "
-            "WHERE kind = 'assign' AND proposed_by = 'adso'"
-        )
-    }
-    raised = 0
-    for (book_id, category_id), evidence in questions.items():
-        row = existing.get((book_id, category_id))
-        if row is not None:
-            if row["status"] == "superseded":
-                conn.execute(
-                    "UPDATE category_suggestions SET status = 'pending', decided_at = NULL WHERE id = ?",
-                    (row["id"],),
-                )
-            continue
-        subject = evidence.split(": ", 1)[-1]
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO category_suggestions
-                (kind, book_id, category_id, match_kind, match_value, confidence, book_count, evidence, proposed_by)
-            VALUES ('assign', ?, ?, 'subject', ?, 0.4, 1, ?, 'adso')
-            """,
-            (book_id, category_id, normalize_term(subject),
-             f"Open Library files this novel under “{subject}”", ),
-        )
-        raised += 1
-    for key, row in existing.items():
-        if row["status"] == "pending" and key not in questions:
-            conn.execute(
-                "UPDATE category_suggestions SET status = 'superseded', decided_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (row["id"],),
-            )
-    return raised
+def _withdraw_fiction_questions(conn: sqlite3.Connection) -> None:
+    """Earlier versions asked about novels Open Library files under a
+    nonfiction genre; that is now decided automatically (they stay out)."""
+    conn.execute(
+        "UPDATE category_suggestions SET status = 'superseded', decided_at = CURRENT_TIMESTAMP "
+        "WHERE kind = 'assign' AND proposed_by = 'adso' AND status = 'pending'"
+    )
 
 
 def _settle_primaries(
@@ -1371,10 +1336,15 @@ def _settle_primaries(
        primary ("Cyberpunk" + "Space Opera" -> "Science Fiction"). When the book
        doesn't carry that ancestor, a 'derived' row is added for it, owned by
        this function and removed as soon as it stops being the answer.
-    4. Otherwise a 'primary' question goes to review.
+    4. Otherwise Adso picks, without asking: the current pick if it is still
+       a candidate (so picks don't flip between runs), then a genre from the
+       user's own shelves, then one on the book's side of fiction/nonfiction,
+       then the most specific, then the rarest in the library (the one that
+       says most about the book). The user can change it on the book page.
 
-    Rejected candidates are never picked or proposed again for that book, and
-    categories the user removed from a book are never derived back onto it.
+    Rejected candidates are never picked for that book, and categories the
+    user removed from a book are never derived back onto it. Primary-genre
+    questions from earlier versions are withdrawn.
     """
     genres: dict[int, list[sqlite3.Row]] = defaultdict(list)
     for row in conn.execute(
@@ -1401,7 +1371,21 @@ def _settle_primaries(
     popularity: dict[int, int] = defaultdict(int)
     for row in conn.execute("SELECT category_id, COUNT(*) AS n FROM book_categories GROUP BY category_id"):
         popularity[row["category_id"]] = row["n"]
+    nonfiction = _nonfiction_genres(taxonomy)
+    fiction_id = _form_id(taxonomy, "fiction")
+    nonfiction_form_id = _form_id(taxonomy, "nonfiction")
+    forms: dict[int, set[int]] = defaultdict(set)
+    for row in conn.execute(
+        "SELECT book_id, category_id FROM book_categories WHERE category_id IN (?, ?)",
+        (fiction_id or 0, nonfiction_form_id or 0),
+    ):
+        forms[row["book_id"]].add(row["category_id"])
 
+    if book_ids is None:
+        conn.execute(
+            "UPDATE category_suggestions SET status = 'superseded', decided_at = CURRENT_TIMESTAMP "
+            "WHERE kind = 'primary' AND status = 'pending'"
+        )
     auto = suggested = 0
     for book_id, rows in genres.items():
         primary = next((row for row in rows if row["role"] == "primary"), None)
@@ -1470,44 +1454,32 @@ def _settle_primaries(
             _close_primary_questions(conn, book_id)
             continue
 
-        # Genuinely different genres: make sure exactly one live question is open.
+        # Genuinely different genres: pick one rather than ask.
         _drop_derived(conn, book_id, derived)
-        pending = [cid for cid, status in states.items() if status == "pending"]
-        for cid in pending:
-            if cid not in candidates:
-                conn.execute(
-                    """
-                    UPDATE category_suggestions SET status = 'superseded', decided_at = CURRENT_TIMESTAMP
-                    WHERE kind = 'primary' AND book_id = ? AND category_id = ?
-                    """,
-                    (book_id, cid),
-                )
-        if any(cid in candidates for cid in pending):
-            continue
-        if current in candidates:
-            best = current
-        else:
-            best = sorted(
-                candidates,
-                key=lambda cid: (
-                    cid not in mine,
-                    -taxonomy.depth(cid),
-                    -popularity.get(cid, 0),
-                    taxonomy.get(cid).label.lower(),
-                ),
-            )[0]
-        others = [taxonomy.path(cid) for cid in sorted(candidates, key=taxonomy.path) if cid != best]
-        evidence = "Also: " + "; ".join(others) if others else None
-        conn.execute(
-            """
-            INSERT INTO category_suggestions (kind, book_id, category_id, confidence, book_count, evidence)
-            VALUES ('primary', ?, ?, ?, 1, ?)
-            ON CONFLICT(book_id, category_id) WHERE kind = 'primary' DO UPDATE SET
-                status = 'pending', evidence = excluded.evidence, decided_at = NULL, decided_by = NULL
-            """,
-            (book_id, best, CONFIDENCE_PRIMARY, evidence),
-        )
-        suggested += 1
+        book_forms = forms.get(book_id, set())
+
+        def off_side(cid: int, book_forms: set[int] = book_forms) -> bool:
+            if fiction_id in book_forms and nonfiction_form_id not in book_forms:
+                return cid in nonfiction
+            if nonfiction_form_id in book_forms and fiction_id not in book_forms:
+                return cid not in nonfiction
+            return False
+
+        best = sorted(
+            candidates,
+            key=lambda cid: (
+                cid != current,
+                cid not in mine,
+                off_side(cid),
+                -taxonomy.depth(cid),
+                popularity.get(cid, 0),
+                taxonomy.get(cid).label.lower(),
+            ),
+        )[0]
+        if current != best:
+            _promote(conn, book_id, best)
+            auto += 1
+        _close_primary_questions(conn, book_id)
     return auto, suggested
 
 
