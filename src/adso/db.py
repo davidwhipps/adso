@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import AdsoError
+from .taxonomy_seed import seed_taxonomy
 
 GOODREADS_FIELDS = (
     "title",
@@ -248,6 +249,7 @@ def initialize(conn: sqlite3.Connection) -> None:
     _migrate_local_tags(conn)
     _migrate_book_metadata(conn)
     _migrate_search_fts(conn)
+    _migrate_categories(conn)
     conn.commit()
 
 
@@ -395,6 +397,132 @@ def _migrate_book_metadata(conn: sqlite3.Connection) -> None:
     )
     for name, ddl in missing.items():
         conn.execute(f"ALTER TABLE books ADD COLUMN {name} {ddl}")
+
+
+def _migrate_categories(conn: sqlite3.Connection) -> None:
+    """Create the category, suggestion and series tables, then seed defaults.
+
+    Categorisation is local data in its own tables rather than JSON columns on
+    `books`: sync never touches it, and a book can carry many categories with
+    per-assignment provenance. Everything here is CREATE ... IF NOT EXISTS, so
+    it is safe on every start and on upgraded catalogues.
+
+    - categories: the user-owned vocabulary, one row per node in a facet
+      (form / genre / audience / theme); genre nodes nest via parent_id.
+    - category_aliases: alternative names, also the matching vocabulary for
+      Goodreads shelves and Open Library subjects.
+    - book_categories: accepted assignments. role is 'primary' (at most one per
+      book, genre only) or 'secondary'; source says who put it there (user,
+      rule, suggestion) and rule_id links rule-made rows to their rule so
+      unmapping a shelf takes its assignments with it.
+    - category_exclusions: a category the user removed from a book, so rules
+      never quietly add it back.
+    - category_rules: accepted "teach once" mappings (shelf/subject/tag value
+      -> category), applied to every matching book on each categorize run.
+    - category_suggestions: the human-in-the-loop review queue. kind='map'
+      proposes a rule; kind='primary' proposes a book's primary genre. Rejected
+      rows are kept so the same suggestion is never raised again.
+    - series / book_series: series membership and reading order, parsed from
+      Goodreads titles ("Red Dragon (Hannibal, #1)") or set by the user. A
+      user row with a NULL series_id means "not part of a series", so title
+      parsing doesn't put it back.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS adso_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS categories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            facet TEXT NOT NULL,
+            slug TEXT NOT NULL,
+            label TEXT NOT NULL,
+            parent_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
+            position INTEGER NOT NULL DEFAULT 0,
+            origin TEXT NOT NULL DEFAULT 'user',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_categories_identity
+            ON categories(facet, COALESCE(parent_id, 0), slug);
+        CREATE INDEX IF NOT EXISTS idx_categories_parent ON categories(parent_id);
+
+        CREATE TABLE IF NOT EXISTS category_aliases (
+            category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+            alias TEXT NOT NULL,
+            PRIMARY KEY(category_id, alias)
+        );
+
+        CREATE TABLE IF NOT EXISTS category_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            match_kind TEXT NOT NULL,
+            match_value TEXT NOT NULL,
+            category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+            created_by TEXT NOT NULL DEFAULT 'cli',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(match_kind, match_value, category_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS book_categories (
+            book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+            category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+            role TEXT NOT NULL DEFAULT 'secondary',
+            source TEXT NOT NULL,
+            rule_id INTEGER REFERENCES category_rules(id) ON DELETE CASCADE,
+            evidence TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(book_id, category_id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_book_categories_one_primary
+            ON book_categories(book_id) WHERE role = 'primary';
+        CREATE INDEX IF NOT EXISTS idx_book_categories_category
+            ON book_categories(category_id);
+
+        CREATE TABLE IF NOT EXISTS category_exclusions (
+            book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+            category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(book_id, category_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS category_suggestions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL,
+            match_kind TEXT,
+            match_value TEXT,
+            book_id INTEGER REFERENCES books(id) ON DELETE CASCADE,
+            category_id INTEGER REFERENCES categories(id) ON DELETE CASCADE,
+            proposed_facet TEXT,
+            proposed_label TEXT,
+            confidence REAL NOT NULL DEFAULT 0,
+            book_count INTEGER NOT NULL DEFAULT 0,
+            evidence TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            decided_at TEXT,
+            decided_by TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_category_suggestions_map
+            ON category_suggestions(match_kind, match_value) WHERE kind = 'map';
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_category_suggestions_primary
+            ON category_suggestions(book_id, category_id) WHERE kind = 'primary';
+
+        CREATE TABLE IF NOT EXISTS series (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE COLLATE NOCASE
+        );
+
+        CREATE TABLE IF NOT EXISTS book_series (
+            book_id INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+            series_id INTEGER REFERENCES series(id) ON DELETE CASCADE,
+            position REAL,
+            source TEXT NOT NULL DEFAULT 'title'
+        );
+        CREATE INDEX IF NOT EXISTS idx_book_series_series ON book_series(series_id);
+        """
+    )
+    seed_taxonomy(conn)
 
 
 def _sqlite_has_fts5(conn: sqlite3.Connection) -> bool:
@@ -1098,6 +1226,30 @@ def merge_books(conn: sqlite3.Connection, *, keep_id: int, drop_id: int) -> None
         values.append(keep_id)
         conn.execute(f"UPDATE books SET {', '.join(assignments)} WHERE id = ?", values)
 
+    # Categories and series are local enrichment too: the keeper gains any the
+    # dropped record had, but its own primary genre and series win.
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO book_categories
+            (book_id, category_id, role, source, rule_id, evidence, created_at)
+        SELECT ?, category_id,
+               CASE WHEN role = 'primary' AND EXISTS (
+                   SELECT 1 FROM book_categories WHERE book_id = ? AND role = 'primary'
+               ) THEN 'secondary' ELSE role END,
+               source, rule_id, evidence, created_at
+        FROM book_categories WHERE book_id = ?
+        """,
+        (keep_id, keep_id, drop_id),
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO book_series (book_id, series_id, position, source)
+        SELECT ?, series_id, position, source FROM book_series WHERE book_id = ?
+        """,
+        (keep_id, drop_id),
+    )
+    for table in ("book_categories", "category_exclusions", "category_suggestions", "book_series"):
+        conn.execute(f"DELETE FROM {table} WHERE book_id = ?", (drop_id,))
     conn.execute("DELETE FROM source_snapshots WHERE book_id = ?", (drop_id,))
     conn.execute("DELETE FROM sync_conflicts WHERE book_id = ?", (drop_id,))
     conn.execute("DELETE FROM duplicate_links WHERE book_id = ?", (drop_id,))

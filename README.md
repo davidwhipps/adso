@@ -85,7 +85,7 @@ For a pinned, reproducible environment, run `pip install -r requirements-lock.tx
 
 - **SQLite is canonical** — your local catalogue is the source of truth.
 - **Goodreads CSV exports** are preserved raw and normalized into the catalogue.
-- **Your local fields** (format, tags, loaned-to, notes) are protected during sync.
+- **Your local fields** (format, tags, categories, series, loaned-to, notes) are protected during sync.
 - **Goodreads updates apply safely** only when your local value hasn't changed since the last sync — otherwise the change is held as a conflict rather than silently overwriting your data.
 - **Cosmetic drift is ignored** — community ratings, edition relabels, ISBNs, page counts, and title casing refresh quietly, while real title/author changes stay tracked. An empty Goodreads value never erases stored data.
 - **Covers and Open Library enrichment**: covers matched to your exact Goodreads edition, plus descriptions, subjects, and place/time facets fetched politely (no API key); books the CSV left without ISBNs get them backfilled from the matched edition.
@@ -149,6 +149,32 @@ adso set-cover GOODREADS_ID --url https://example.com/cover.jpg
 ```
 
 Covers resolve from the book's own public Goodreads page first, so you get the same edition's cover Goodreads shows. If that has none, Adso falls back to Open Library and then Apple Books. No account or key is needed, and covers are fetched automatically after import/sync (pass `--no-covers` to skip). To swap covers you fetched earlier for the Goodreads versions, run `adso fetch-covers --refresh`. A manual cover is never overwritten by an automatic fetch.
+
+## Categories and series
+
+Goodreads exports carry no genres, only your own shelves. Adso builds a proper category system from what it does have, and you approve every step.
+
+- **Facets:** form (fiction, nonfiction, poetry…), genre, audience and theme. Genre is a tree, so filtering by *Speculative Fiction* includes *Science Fiction > Space Opera*. Each book has at most one **primary genre** plus any number of secondary categories.
+- **A starter taxonomy** is seeded once. After that it's yours: rename, move, merge, delete and add aliases with `adso taxonomy`.
+- **Suggestions, never silent changes.** `adso categorize` (also run after every sync) turns your custom Goodreads shelves, Open Library subjects and tags into proposals such as *shelf `cozy-fantasy` (14 books) → Genre: Fantasy > Cozy Fantasy*. Accepting one creates a rule that applies to every matching book now and to new books on each later sync, so you decide once per shelf, not once per book. Rejected proposals never come back.
+- **Your edits win.** Categories you set by hand are never touched by a run. Removing a category from a book stops rules from adding it back. Rule-made categories follow their evidence, so removing a shelf on Goodreads removes the category it brought.
+- **Primary genres settle themselves** when a book has one most-specific genre. When genres compete, you get one question per book.
+- **Series** and reading order are read from Goodreads titles ("Leviathan Wakes (The Expanse, #1)"). You can override them by hand.
+
+```bash
+adso categorize                          # apply rules, raise suggestions (--dry-run to preview)
+adso review                              # open suggestions, highest-leverage first
+adso review 12 --accept                  # or --as "Fantasy > Cozy Fantasy", --reject, --reopen
+adso taxonomy list --used                # the tree with book counts
+adso taxonomy add "theme:Found family"   # or "Fantasy > Grimdark"
+adso taxonomy map --shelf favorites --to "theme:Favourites"
+adso taxonomy rules                      # and `adso taxonomy unmap RULE_ID`
+adso taxonomy merge "Space Opera" "Science Fiction" --yes
+adso edit GOODREADS_ID --genre "Historical Fiction" --add-category "theme:Monasteries"
+adso list --category "Speculative Fiction" --status "To Read"
+adso list --series "The Expanse"         # in reading order
+adso list --gr-shelf cozy-fantasy        # any Goodreads shelf, not just the exclusive one
+```
 
 ## Optional & experimental
 
