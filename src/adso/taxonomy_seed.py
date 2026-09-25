@@ -47,7 +47,7 @@ SEED: dict[str, tuple[_Node, ...]] = {
             (
                 (
                     "Science Fiction",
-                    ("sci fi", "scifi", "sf", "science fiction general"),
+                    ("sci fi", "scifi", "sf", "science fiction general", "hard sf", "hard science fiction"),
                     (
                         ("Space Opera", (), ()),
                         ("Cyberpunk", (), ()),
@@ -70,7 +70,7 @@ SEED: dict[str, tuple[_Node, ...]] = {
         ),
         (
             "Literary Fiction",
-            ("literary", "literature"),
+            ("literary", "literature", "lit fic", "litfic"),
             (
                 ("Classics", ("classic", "classic literature"), ()),
                 ("Contemporary Fiction", ("contemporary",), ()),
@@ -88,6 +88,7 @@ SEED: dict[str, tuple[_Node, ...]] = {
                 "detective and mystery stories",
                 "mystery general",
                 "whodunit",
+                "whodunnit",
             ),
             (
                 ("Cozy Mystery", ("cozy mysteries", "cosy mystery"), ()),
@@ -105,7 +106,7 @@ SEED: dict[str, tuple[_Node, ...]] = {
         (
             "History",
             ("world history",),
-            (("Military History", ("war", "military"), ()),),
+            (("Military History", ("war", "military", "ww2", "wwii", "world war ii", "ww1", "wwi"), ()),),
         ),
         (
             "Biography & Memoir",
@@ -116,7 +117,7 @@ SEED: dict[str, tuple[_Node, ...]] = {
         ("Religion & Spirituality", ("religion", "spirituality", "theology"), ()),
         (
             "Science",
-            ("popular science", "pop science"),
+            ("popular science", "pop science", "popsci", "pop sci"),
             (
                 ("Physics", ("astronomy", "cosmology"), ()),
                 ("Biology", ("evolution", "genetics"), ()),

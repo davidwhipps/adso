@@ -264,6 +264,29 @@ class EngineTests(CategorizeTestCase):
         values = [item["match_value"] for item in cat.list_suggestions(self.conn)]
         self.assertNotIn("cozy fantasy", values)
 
+    def test_deleting_a_mapped_category_reopens_its_shelf(self):
+        self.sync(LIBRARY)
+        cat.categorize(self.conn)
+        cat.accept_suggestion(self.conn, self.proposal("shelf", "space opera")["id"])
+        cat.delete_category(self.conn, "Space Opera")
+        cat.categorize(self.conn)
+        # The shelf is unmapped again, so it is asked about again (with a new guess).
+        self.assertEqual(self.proposal("shelf", "space opera")["book_count"], 2)
+
+    def test_dated_and_club_shelves_are_not_proposed(self):
+        self.sync([
+            book("8", "A", "read, read-in-2024, 2025-reads, book-club"),
+            book("9", "B", "read, lit-fic, whodunnit, popsci, ww2"),
+        ])
+        cat.categorize(self.conn)
+        items = {item["match_value"]: item["target"] for item in cat.list_suggestions(self.conn)}
+        for skipped in ("read in 2024", "2025 reads", "book club"):
+            self.assertNotIn(skipped, items)
+        self.assertEqual(items["lit fic"], "Genre: Literary Fiction")
+        self.assertEqual(items["whodunnit"], "Genre: Mystery & Crime")
+        self.assertEqual(items["popsci"], "Genre: Science")
+        self.assertEqual(items["ww2"], "Genre: History > Military History")
+
     def test_dry_run_writes_nothing(self):
         self.sync(LIBRARY)
         result = cat.categorize(self.conn, dry_run=True)

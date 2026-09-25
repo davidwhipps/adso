@@ -67,8 +67,17 @@ NON_CATEGORY_SHELVES = frozenset(
         "abandoned",
         "recommendations",
         "recommended",
+        "book club",
+        "bookclub",
     }
 )
+
+# Date-stamped shelves ("read-in-2024", "2025-reads", "2023") track when, not what.
+_DATED_SHELF_RE = re.compile(r"^(?:read )?(?:in )?(?:19|20)\d\d(?: reads?| books?)?$")
+
+
+def _is_non_category_shelf(value: str) -> bool:
+    return value in NON_CATEGORY_SHELVES or bool(_DATED_SHELF_RE.match(value))
 
 MATCH_KINDS = ("shelf", "subject", "tag")
 MATCH_KIND_LABELS = {
@@ -490,11 +499,13 @@ def _purge_category(conn: sqlite3.Connection, category_id: int) -> None:
     conn.execute("DELETE FROM category_rules WHERE category_id = ?", (category_id,))
     conn.execute("DELETE FROM category_aliases WHERE category_id = ?", (category_id,))
     conn.execute("DELETE FROM category_exclusions WHERE category_id = ?", (category_id,))
-    # Open questions about this category go (the next run re-asks with a fresh
-    # guess); decided ones stay as history so a rejection still holds.
+    # Open questions and accepted mappings about this category go: the rule
+    # behind an accepted mapping was just deleted, so its shelf/subject is
+    # unmapped again and the next run re-asks with a fresh guess. Rejections
+    # stay as history so "don't map this shelf" still holds.
     conn.execute(
         "DELETE FROM category_suggestions WHERE category_id = ? "
-        "AND (kind = 'primary' OR status IN ('pending', 'superseded'))",
+        "AND (kind = 'primary' OR status IN ('pending', 'superseded', 'accepted'))",
         (category_id,),
     )
     conn.execute(
@@ -1198,7 +1209,7 @@ def _guess_category(
         return exact[0], CONFIDENCE_EXACT[kind], None
     if kind != "shelf":
         return None  # subjects and tags only raise proposals on a clean match
-    if value in NON_CATEGORY_SHELVES:
+    if _is_non_category_shelf(value):
         return None
     tokens = value.split()
     partial: set[int] = set()
