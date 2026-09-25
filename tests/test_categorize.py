@@ -755,6 +755,17 @@ class EraAndNoiseTests(CategorizeTestCase):
         with self.assertRaises(cat.CategoryError):
             cat.accept_suggestion(self.conn, card["id"], as_category="era:Modernist")
 
+    def test_era_rules_from_before_are_dropped(self):
+        era = cat.Taxonomy(self.conn).resolve("era:Contemporary").id
+        cat._insert_rule(self.conn, "subject", "russian literature", era, actor="cli")
+        self.conn.commit()
+        cat.categorize(self.conn)  # an era rule no longer applies; the year still does
+        self.assertEqual(self.paths("1", "era"), ["19th Century"])
+        db.initialize(self.conn)
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM category_rules WHERE category_id = ?", (era,)).fetchone()[0], 0
+        )
+
     def test_noise_subjects_and_dnf_shelves_raise_nothing(self):
         values = [item["match_value"] for item in cat.list_suggestions(self.conn)]
         for noise in ("new york times reviewed", "open syllabus project", "general", "attempted"):

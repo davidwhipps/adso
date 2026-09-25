@@ -566,6 +566,14 @@ def _migrate_categories(conn: sqlite3.Connection) -> None:
         """
     )
     seed_taxonomy(conn)
+    # Era comes from the publication year; mapping rules into it (possible
+    # briefly after era arrived) are dropped with what they assigned, and
+    # the next categorisation run fills eras in from the year again.
+    era_rules = "SELECT r.id FROM category_rules r JOIN categories c ON c.id = r.category_id WHERE c.facet = 'era'"
+    if conn.execute(era_rules).fetchone():
+        conn.execute(f"DELETE FROM book_categories WHERE rule_id IN ({era_rules})")
+        conn.execute(f"DELETE FROM category_rules WHERE id IN ({era_rules})")
+        conn.execute("INSERT OR REPLACE INTO adso_meta (key, value) VALUES ('taxonomy_recategorize', '1')")
 
 
 def _migrate_tag_rules(conn: sqlite3.Connection) -> None:

@@ -42,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pickers, subjects such as "19th century" aren't proposed as eras, and a rule
   or "accept as" pointing at an era is refused. You can still set one book's
   era by hand.
+- Review cards explain a decision that can't go through instead of doing
+  nothing: a card that was already settled (for example withdrawn when
+  another decision re-checked the queue) collapses with the reason, and a
+  refused accept shows its error on the card. Accepting a leftover
+  "subject -> Era" card is refused, and era mapping rules made before era
+  became automatic are removed so the publication year applies again.
 - Pick lists show categories in use first. The library sidebar gains
   Traditions and Eras, and Next up can filter by them.
 - New directions finds neighbours of top-level genres through the books they

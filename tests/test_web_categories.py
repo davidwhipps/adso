@@ -115,7 +115,27 @@ class WebCategoryTests(unittest.TestCase):
         card = self.card("Tag: #stoicism")
         response = self.client.post(f"/categories/suggestions/{card['id']}/reject")
         self.assertIn("be suggested for these again", response.text)
-        self.assertEqual(self.client.post(f"/categories/suggestions/{card['id']}/reject").status_code, 400)
+        # Deciding a card twice (a stale page) says so instead of failing silently.
+        again = self.client.post(f"/categories/suggestions/{card['id']}/reject")
+        self.assertEqual(again.status_code, 200)
+        self.assertIn("Nothing to do: this suggestion was already rejected.", again.text)
+
+    def test_withdrawn_and_refused_cards_explain_themselves(self):
+        era = self.category_id("Contemporary")
+        self.conn.execute(
+            "INSERT INTO category_suggestions (kind, match_kind, match_value, category_id, confidence, book_count, "
+            "evidence, proposed_by) VALUES ('map', 'subject', 'contemporary', ?, 0.7, 1, 'e.g. It', 'adso')",
+            (era,),
+        )
+        self.conn.commit()
+        sid = self.conn.execute("SELECT id FROM category_suggestions WHERE match_value = 'contemporary'").fetchone()[0]
+        refused = self.client.post(f"/categories/suggestions/{sid}/accept")
+        self.assertIn('class="cat-err', refused.text)
+        self.assertIn("publication year", refused.text)
+        self.assertEqual(cat.list_rules(self.conn), [])
+        cat.categorize(self.conn)  # the queue is re-checked: an era card is withdrawn
+        stale = self.client.post(f"/categories/suggestions/{sid}/accept")
+        self.assertIn("Nothing to do: this suggestion was withdrawn", stale.text)
 
     def test_primary_question_offers_its_genres(self):
         self.accept("Genre: Science Fiction")
