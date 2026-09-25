@@ -109,7 +109,7 @@ claude mcp add adso -- adso --db /absolute/path/to/adso.sqlite mcp
 
 **→ Full setup for Claude Code, Codex, and Claude Desktop is in [MCP.md](MCP.md).**
 
-**Twelve tools, safe by design.** The agent can search the catalogue (including by category, Goodreads shelf and series), fetch a book with its genres and series, summarise your library, and browse your category tree — plus curated writes: add/remove tags, set a book's owned format, record a loan, and *suggest* categories, which wait in your review queue until you accept them. The guardrails matter as much as the tools:
+**Sixteen tools, safe by design.** The agent can ask what you should read next (with the reasons), suggest new directions, find related books, summarise your reading by genre, search the catalogue (including by category and series), fetch a book with its genres and series, and browse your category tree — plus curated writes: add/remove tags, set a book's owned format, record a loan, and *suggest* categories, which wait in your review queue until you accept them. The guardrails matter as much as the tools:
 
 - **Private by default.** Tool output is assembled from an explicit allowlist, so your Goodreads *private notes* — and any field added to the schema later — are never exposed to the agent. It is deliberately not a "return every column" dump.
 - **Categories are proposals.** An agent can suggest categories for a book, but they only land in your review queue; nothing is assigned until you accept.
@@ -180,6 +180,26 @@ adso list --category "Speculative Fiction" --status "To Read"
 adso list --series "The Expanse"         # in reading order
 adso list --gr-shelf cozy-fantasy        # any Goodreads shelf, not just the exclusive one
 ```
+
+## What to read next
+
+Adso ranks your to-read shelf against your own taste and tells you why each book is there.
+
+- **Your taste** comes from what you've finished and how you rated it: genres, themes, tags, Open Library subjects and authors. 5★ counts strongly for, 1★ strongly against, a book you read but didn't rate mildly for, and a did-not-finish against. A genre needs a few books behind it before it counts fully, and specific genres ("Space Opera") weigh more than broad ones ("Fiction").
+- **Series order:** the next unread book in a series you're enjoying moves up; a book whose earlier volume you haven't read waits.
+- **Also:** authors you rate highly, books you own, and strong Goodreads ratings get a nudge, and a variety pass keeps the list from being ten books of one genre.
+- **New directions:** genres next to ones you love that you've barely read, with books already on your shelf.
+- **Insights:** reading by genre (read, average rating, DNF rate, to-read), with notes when your pile leans toward what you rate lower.
+
+```bash
+adso next                                # top 10 with reasons
+adso next --category Fantasy --owned --max-pages 350
+adso next --explore                      # new directions
+adso related GOODREADS_ID                # books most like one book
+adso insights
+```
+
+In the web UI it's **Next up** (More menu, or "What to read next" in the sidebar), and each book page has a **Related** strip. Rating more of what you've read and reviewing categories both sharpen the picks.
 
 ## Optional & experimental
 

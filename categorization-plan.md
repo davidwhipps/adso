@@ -157,7 +157,10 @@ Each book goes through a pipeline of pluggable "suggesters". Each suggester retu
    - Pending proposals are revalidated on each run.
    - Examples show the most recently added books.
 3. **AI suggester**: the `[ai]` optional extra with the `anthropic` SDK, batching, prompt caching, cost dry-run, and proposed-category approval.
-4. **Relationships and next reads**: `related_books`, the taste profile, `adso next`, the web panel, and insight views.
+4. **Relationships and next reads** (done):
+   - `recommend.py`: a taste profile from ratings over genre/theme/tag/subject/author features (idf-weighted, shrunk toward neutral), `next_reads` with series order, owned and community nudges, a variety pass and reasons, `explore_paths`, `related_books` and `insights`.
+   - Surfaces: CLI `next`/`related`/`insights`, the web `/next` page and Related strip, `/api/next`, and four MCP tools.
+   - Explicit `book_relations` (companion, responds-to) is left for later; series and similarity cover the common cases.
 
 ## Critical files
 

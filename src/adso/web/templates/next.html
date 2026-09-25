@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}Adso · Next up{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-semibold tracking-tight">What to read next</h1>
+<p class="mb-6 text-muted-foreground">
+  Your to-read shelf, ranked by what you've rated highly: genres, themes, tags, subjects and authors,
+  plus the next book in series you're enjoying and what you own. Every pick says why.
+</p>
+
+<form method="get" action="/next" class="card mb-8">
+  <section class="flex flex-wrap items-end gap-3 pt-2">
+    <label class="grid gap-1 text-sm">Genre
+      <select name="category" class="select">
+        <option value="">Any</option>
+        {% for c in choices if c.facet in ("genre", "theme") and c.total %}
+        <option value="{{ c.ref }}" {{ "selected" if c.ref == f.category }}>{{ c.display }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="grid gap-1 text-sm">Length
+      <select name="max_pages" class="select">
+        <option value="">Any length</option>
+        {% for n in (200, 300, 400) %}<option value="{{ n }}" {{ "selected" if f.max_pages == n }}>Up to {{ n }} pages</option>{% endfor %}
+      </select>
+    </label>
+    <label class="flex h-9 items-center gap-2 text-sm">
+      <input type="checkbox" name="owned" value="1" {{ "checked" if f.owned }}> Only books I own
+    </label>
+    <button class="btn-sm h-9" type="submit">Update</button>
+  </section>
+</form>
+
+{% if error %}<div class="alert-destructive mb-6" role="alert"><section>{{ error }}</section></div>{% endif %}
+
+<section class="mb-12">
+  {% if picks %}
+  <ol class="picks">
+    {% for pick in picks %}
+    <li class="pick">
+      <a class="pick-cover" href="/book/{{ pick.goodreads_id }}"><img src="{{ pick.cover_url }}?size=thumb" alt="" loading="lazy"></a>
+      <div class="pick-body">
+        <div class="pick-rank mono">{{ loop.index }}</div>
+        <h2 class="pick-title"><a href="/book/{{ pick.goodreads_id }}">{{ pick.title }}</a></h2>
+        <p class="pick-by">{% if pick.author %}by {{ pick.author }}{% endif %}{% if pick.primary_genre %} <span class="mono">· {{ pick.primary_genre.split(" > ")[-1] }}</span>{% endif %}{% if pick.pages %} <span class="mono">· {{ pick.pages }} pp</span>{% endif %}</p>
+        <ul class="pick-reasons">
+          {% for reason in pick.reasons %}<li>{{ reason }}</li>{% else %}<li>On your to-read shelf; rate a few more books to sharpen this.</li>{% endfor %}
+        </ul>
+      </div>
+    </li>
+    {% endfor %}
+  </ol>
+  {% else %}
+  <p class="text-muted-foreground">Nothing on your to-read shelf matches these filters.</p>
+  {% endif %}
+</section>
+
+{% if paths %}
+<section class="mb-12">
+  <h2 class="mb-1 text-xl font-semibold tracking-tight">New directions</h2>
+  <p class="mb-4 text-muted-foreground">Genres next to ones you love that you've barely read, with books already on your shelf.</p>
+  <div class="grid gap-4 md:grid-cols-2">
+    {% for path in paths %}
+    <div class="card catcard">
+      <h3 class="font-medium">Try {{ path.genre.split(" > ")[-1] }}</h3>
+      <p class="mt-1 text-sm text-muted-foreground">{{ path.because }}</p>
+      <div class="catbooks">
+        {% for book in path.books %}<a class="catsrc hover:underline" href="/book/{{ book.goodreads_id }}">{{ book.title }}</a>{% endfor %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<section class="mb-6">
+  <h2 class="mb-1 text-xl font-semibold tracking-tight">Your reading</h2>
+  <p class="mb-4 text-muted-foreground">
+    {{ insights.read }} read · {{ insights.dnf }} did not finish · {{ insights.to_read }} to read{% if insights.average_rating %} · average {{ insights.average_rating }}★{% endif %}.
+    {% if insights.unrated_read %}<a class="underline" href="/?smart=unrated">{{ insights.unrated_read }} read books are unrated</a> — rating them sharpens these picks.{% endif %}
+    {% if insights.uncategorised %}{{ insights.uncategorised }} books have no category yet — <a class="underline" href="/review#categories">Review</a> helps.{% endif %}
+  </p>
+  {% if insights.notes %}
+  <ul class="mb-4 grid gap-1">{% for note in insights.notes %}<li class="text-sm">· {{ note }}</li>{% endfor %}</ul>
+  {% endif %}
+  {% if insights.genres %}
+  <div class="overflow-x-auto">
+    <table class="table text-sm">
+      <thead><tr><th>Genre</th><th class="text-right">Read</th><th class="text-right">Avg rating</th><th class="text-right">DNF</th><th class="text-right">To read</th></tr></thead>
+      <tbody>
+        {% for row in insights.genres %}
+        <tr>
+          <td><a class="hover:underline" href="/?category={{ row.id }}">{{ row.genre }}</a></td>
+          <td class="text-right">{{ row.read }}</td>
+          <td class="text-right">{{ "%.1f★" | format(row.avg_rating) if row.avg_rating is not none else "—" }}</td>
+          <td class="text-right">{{ (row.dnf_rate * 100) | int ~ "%" if row.dnf_rate is not none else "—" }}</td>
+          <td class="text-right">{{ row.to_read }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}
