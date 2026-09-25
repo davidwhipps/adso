@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **A starter taxonomy built for readers, not bookshops.** The genre tree is
+  flat and descriptive: Psychological Fiction, Novel of Ideas, Family Saga,
+  Coming of Age, Social Novel, Satire & Comic Fiction, Autofiction,
+  Experimental & Metafiction, Historical, War, Political & Dystopian, Magical
+  Realism & Fabulism, Myth & Retellings, Love Stories, Crime & Mystery,
+  Thriller & Espionage, Science Fiction, Fantasy, Horror & Gothic and
+  Adventure, plus a reworked nonfiction list (Religion & Mythology, Science &
+  Nature, Writing & Literature, Travel & Place…). Speculative Fiction,
+  Literary Fiction and Classics are gone, and subgenres are left to you.
+  - New **Tradition** facet (American, British & Irish, Continental European,
+    Russian, Latin American, Japanese & East Asian, Translated), proposed from
+    Open Library subjects such as "Russian literature" or "Translations into
+    English". "Romance literature" (the Romance languages) now maps here, not
+    to a romance genre.
+  - New **Era** facet, filled in automatically from the original publication
+    year. An era you set by hand wins; one you remove stays removed.
+  - Themes seeded from what books are about: Family, Love & Marriage,
+    Friendship, Grief & Loss, War (World War I, World War II) and Writers &
+    Artists. WWII is a theme, so it covers novels and history alike.
+  - Forms gain Diaries & Letters.
+  - Existing catalogues are reshaped once, on upgrade: seed categories are
+    renamed or moved into the new tree, unused old ones are removed, and any
+    you used (a rule or a book you filed) stay. Suggestions are then rebuilt
+    against the new tree.
+- Open Library subjects that describe a list or an edition ("New York Times
+  reviewed", reading levels, syllabus projects) are ignored for suggestions
+  and recommendation reasons.
+- Custom did-not-finish shelves (`attempted`, `abandoned`, `gave-up`) count as
+  DNF and are never proposed as tags. A `shortlist` shelf or tag nudges a
+  book up in Next up.
+- Pick lists show categories in use first. The library sidebar gains
+  Traditions and Eras, and Next up can filter by them.
+- New directions finds neighbours of top-level genres through the books they
+  share.
+
 ### Added
 - **What to read next** (phase 4): `adso next`, `adso related`, `adso insights`,
   a web **Next up** page, a **Related** strip on book pages, and MCP tools

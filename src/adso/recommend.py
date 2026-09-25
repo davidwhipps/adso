@@ -4,7 +4,8 @@ Everything is computed from the catalogue on demand (a library is thousands of
 rows at most): no model, no network, no stored state. The inputs are the
 user's own signals:
 
-- **Taste** comes from books on the read and did-not-finish shelves. A rating
+- **Taste** comes from books on the read and did-not-finish shelves (custom
+  shelves such as "attempted" or "abandoned" count as did-not-finish). A rating
   is the strongest signal (5 stars +2 ... 1 star -2); a book read but unrated
   counts mildly for (it was finished), a DNF counts against.
 - **Features** of a book are its categories (with their ancestors, so loving
@@ -33,8 +34,12 @@ from . import categorize as cat
 from .catalogue import list_books
 
 READ_SHELVES = frozenset({"read"})
-DNF_SHELVES = frozenset({"did-not-finish", "dnf", "abandoned"})
 PILE_SHELVES = frozenset({"to-read"})
+# Shelves or tags that mean "read this soon": a small push up the list.
+SHORTLIST_TERMS = frozenset({"shortlist", "short list", "up next", "next up", "read next", "priority"})
+SHORTLIST_BONUS = 0.35
+# Subjects too broad to say anything about taste.
+GENERIC_SUBJECTS = frozenset({"fiction", "nonfiction", "non fiction", "literature", "fiction general"})
 
 RATING_SIGNAL = {5: 2.0, 4: 1.0, 3: 0.0, 2: -1.0, 1: -2.0}
 UNRATED_READ_SIGNAL = 0.3
@@ -45,8 +50,10 @@ DNF_SIGNAL = -1.5
 FEATURE_WEIGHT = {"cat": 1.0, "tag": 0.8, "subject": 0.35}
 # Within categories, broad facets say little about taste ("Fiction"), so they
 # count for less and are never given as the reason for a pick.
-FACET_WEIGHT = {"genre": 1.0, "theme": 1.0, "audience": 0.5, "form": 0.3}
-REASON_FACETS = frozenset({"genre", "theme"})
+FACET_WEIGHT = {"genre": 1.0, "theme": 1.0, "tradition": 0.8, "audience": 0.5, "era": 0.4, "form": 0.3}
+REASON_FACETS = frozenset({"genre", "theme", "tradition", "era"})
+# Facets whose labels read as adjectives ("Russian", "19th Century").
+_ADJECTIVE_FACETS = frozenset({"tradition", "era"})
 # Shrinkage: a feature's affinity is sum(signal) / (reads + PRIOR), so it needs
 # a few books behind it before it counts fully.
 PRIOR = 2.0
@@ -71,8 +78,22 @@ class _Book:
         return self.record.get("exclusive_shelf") or ""
 
     @property
+    def is_dnf(self) -> bool:
+        if cat.normalize_term(self.shelf) in cat.DNF_SHELF_TERMS:
+            return True
+        # A book shelved "read" and also "attempted" wasn't really finished.
+        return self.shelf in READ_SHELVES and any(
+            cat.normalize_term(s) in cat.DNF_SHELF_TERMS for s in self.record.get("shelves") or []
+        )
+
+    @property
+    def shortlisted(self) -> bool:
+        marks = list(self.record.get("shelves") or []) + list(self.record.get("tags") or [])
+        return any(cat.normalize_term(m) in SHORTLIST_TERMS for m in marks)
+
+    @property
     def signal(self) -> float | None:
-        if self.shelf in DNF_SHELVES:
+        if self.is_dnf:
             return DNF_SIGNAL
         if self.shelf in READ_SHELVES:
             return RATING_SIGNAL.get(self.record.get("rating") or 0, UNRATED_READ_SIGNAL)
@@ -115,7 +136,7 @@ class Library:
                 features[("tag", tag)] = FEATURE_WEIGHT["tag"]
             for subject in record.get("subjects") or []:
                 term = cat.normalize_term(subject)
-                if term:
+                if term and term not in GENERIC_SUBJECTS and not cat.is_noise_subject(term):
                     features.setdefault(("subject", term), FEATURE_WEIGHT["subject"])
             self.books[record["id"]] = _Book(record, features, primary, series.get(record["id"]))
 
@@ -138,14 +159,14 @@ class Library:
                 stat = self.taste[feature]
                 stat.total += signal
                 stat.reads += 1
-                if rating and book.shelf in READ_SHELVES:
+                if rating and not book.is_dnf:
                     stat.ratings.append(rating)
             author = book.record.get("author")
             if author:
                 stat = self.authors[author]
                 stat.total += signal
                 stat.reads += 1
-                if rating and book.shelf in READ_SHELVES:
+                if rating and not book.is_dnf:
                     stat.ratings.append(rating)
 
         self.series_members: dict[str, list[_Book]] = defaultdict(list)
@@ -169,6 +190,8 @@ class Library:
         label = self.feature_label(feature)
         where = {"cat": "", "tag": "books tagged ", "subject": "books about "}[feature[0]]
         if avg is not None:
+            if feature[0] == "cat" and self.taxonomy.get(feature[1]).facet in _ADJECTIVE_FACETS:
+                return f"You rate {label} books {avg:.1f}★ ({stat.reads} read)"
             return f"You rate {where}{label} {avg:.1f}★ ({stat.reads} read)"
         return f"You've read {stat.reads} {where}{label} book{'s' if stat.reads != 1 else ''}"
 
@@ -233,6 +256,7 @@ class Library:
         series, series_reason = self.series_position(book)
         author, author_reason = self.author_match(book)
         owned = OWNED_BONUS if book.record.get("format") else 0.0
+        shortlist = SHORTLIST_BONUS if book.shortlisted else 0.0
         community = 0.0
         try:
             community = max(-0.4, min(0.4, (float(book.record.get("average_rating") or 0) - 3.9) * COMMUNITY_WEIGHT))
@@ -244,6 +268,8 @@ class Library:
         reasons: list[str] = []
         if series_reason:
             reasons.append(series_reason)
+        if shortlist:
+            reasons.append("On your shortlist")
         # Say which of the user's tastes the book matches: the strongest
         # positive contributors, preferring categories and skipping ancestors
         # of an already-named category.
@@ -266,7 +292,7 @@ class Library:
             reasons.append(f"You own it ({book.record['format']})")
         if community >= 0.2:
             reasons.append(f"Goodreads readers rate it {book.record['average_rating']}")
-        return taste + series + author + owned + community, reasons
+        return taste + series + author + owned + shortlist + community, reasons
 
 
 # ---------------------------------------------------------------------------
@@ -344,8 +370,10 @@ def next_reads(
 def explore_paths(conn: sqlite3.Connection, *, limit: int = 4, books_per_path: int = 3) -> list[dict[str, Any]]:
     """Genres next to ones the user loves that they've barely read, with books to start.
 
-    Neighbours are a loved genre's siblings, children and parent in the tree;
-    a path needs at least one to-read book and at most one book already read.
+    Neighbours are a loved genre's children, parent and siblings in the tree,
+    then the genres that most often share books with it (top-level genres are
+    flat, so for them co-occurrence is what "nearby" means). A path needs at
+    least one to-read book and at most one book already read.
     """
     lib = Library(conn)
     genre_ids = {cid for cid, node in lib.taxonomy.by_id.items() if node.facet == "genre"}
@@ -363,13 +391,21 @@ def explore_paths(conn: sqlite3.Connection, *, limit: int = 4, books_per_path: i
             for kind, cid in book.features:
                 if kind == "cat" and cid in genre_ids:
                     pile[cid].append(book)
+    together: dict[int, dict[int, int]] = defaultdict(lambda: defaultdict(int))
+    for book in lib.books.values():
+        genres = [cid for kind, cid in book.features if kind == "cat" and cid in genre_ids]
+        for a in genres:
+            for b in genres:
+                if a != b:
+                    together[a][b] += 1
     paths: list[dict[str, Any]] = []
     used: set[int] = set()
     for _, source in loved:
         node = lib.taxonomy.get(source)
-        neighbours = list(lib.taxonomy.children.get(node.parent_id, [])) + list(lib.taxonomy.children.get(source, []))
+        neighbours = list(lib.taxonomy.children.get(source, []))
         if node.parent_id is not None:
-            neighbours.append(node.parent_id)
+            neighbours += [node.parent_id, *lib.taxonomy.children.get(node.parent_id, [])]
+        neighbours += sorted(together[source], key=lambda cid: -together[source][cid])
         for cid in neighbours:
             if cid == source or cid in used or cid not in genre_ids:
                 continue
@@ -438,8 +474,8 @@ def related_books(conn: sqlite3.Connection, goodreads_id: str, *, limit: int = 1
 def insights(conn: sqlite3.Connection) -> dict[str, Any]:
     """Reading by genre, and where the to-read pile leans away from what you enjoy."""
     lib = Library(conn)
-    read = [b for b in lib.books.values() if b.shelf in READ_SHELVES]
-    dnf = [b for b in lib.books.values() if b.shelf in DNF_SHELVES]
+    read = [b for b in lib.books.values() if b.shelf in READ_SHELVES and not b.is_dnf]
+    dnf = [b for b in lib.books.values() if b.is_dnf]
     pile = [b for b in lib.books.values() if b.shelf in PILE_SHELVES]
     rated = [b.record["rating"] for b in read if b.record.get("rating")]
     overall = sum(rated) / len(rated) if rated else None

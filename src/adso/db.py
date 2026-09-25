@@ -251,6 +251,13 @@ def initialize(conn: sqlite3.Connection) -> None:
     _migrate_search_fts(conn)
     _migrate_categories(conn)
     conn.commit()
+    if conn.execute("SELECT 1 FROM adso_meta WHERE key = 'taxonomy_recategorize'").fetchone():
+        # A seed revision reshaped the taxonomy: re-match the library against
+        # it once, so review shows proposals for the new tree straight away.
+        from .categorize import categorize
+
+        conn.execute("DELETE FROM adso_meta WHERE key = 'taxonomy_recategorize'")
+        categorize(conn)
 
 
 def _migrate_sync_conflicts(conn: sqlite3.Connection) -> None:

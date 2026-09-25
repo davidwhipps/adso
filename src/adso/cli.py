@@ -1595,7 +1595,7 @@ def _format_rules(rules: list[dict[str, object]]) -> str:
     return "\n".join(lines)
 
 
-_SOURCE_LABELS = {"user": "you", "rule": "rule", "derived": "default"}
+_SOURCE_LABELS = {"user": "you", "rule": "rule", "derived": "default", "year": "year"}
 
 
 def _format_book_categories(data: dict[str, object]) -> str:

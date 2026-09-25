@@ -16,12 +16,15 @@ from __future__ import annotations
 import sqlite3
 
 # Facets are fixed dimensions; categories live inside exactly one. Only the
-# genre facet is a hierarchy with a primary role (see db / categorize).
-FACETS = ("form", "genre", "audience", "theme")
+# genre facet is a hierarchy with a primary role (see db / categorize). Era is
+# filled in from the original publication year rather than from evidence.
+FACETS = ("form", "genre", "tradition", "era", "audience", "theme")
 
 FACET_LABELS = {
     "form": "Form",
     "genre": "Genre",
+    "tradition": "Tradition",
+    "era": "Era",
     "audience": "Audience",
     "theme": "Theme",
 }
@@ -30,109 +33,176 @@ FACET_LABELS = {
 # alias that only restates the label is unnecessary.
 _Node = tuple  # (label, tuple[str, ...], tuple[_Node, ...])
 
+# Genres describe what kind of book it is. There's deliberately no catch-all
+# ("Literary Fiction", "Classics"): a novel that fits none of these has no
+# primary genre, and its form, tradition and era still describe it. Subgenres
+# are left for the user to add once enough books need them.
 SEED: dict[str, tuple[_Node, ...]] = {
     "form": (
         ("Fiction", ("novel", "novels", "fiction general"), ()),
         ("Nonfiction", ("non fiction", "non-fiction"), ()),
-        ("Poetry", ("poems", "verse"), ()),
-        ("Graphic", ("graphic novels", "graphic novel", "comics", "manga"), ()),
-        ("Drama", ("plays", "theatre", "theater"), ()),
         ("Short Stories", ("short story", "short fiction", "anthology", "anthologies"), ()),
         ("Essays", ("essay",), ()),
+        ("Poetry", ("poems", "verse"), ()),
+        ("Drama", ("plays", "theatre", "theater"), ()),
+        ("Graphic", ("graphic novels", "graphic novel", "comics", "manga"), ()),
+        (
+            "Diaries & Letters",
+            ("diaries", "diary", "letters", "correspondence", "authors correspondence", "journals"),
+            (),
+        ),
     ),
     "genre": (
+        # Fiction
         (
-            "Speculative Fiction",
-            ("speculative", "spec fic", "sff", "sf and f"),
-            (
-                (
-                    "Science Fiction",
-                    ("sci fi", "scifi", "sf", "science fiction general", "hard sf", "hard science fiction"),
-                    (
-                        ("Space Opera", (), ()),
-                        ("Cyberpunk", (), ()),
-                        ("Dystopian", ("dystopia", "dystopias", "dystopian fiction"), ()),
-                        ("Time Travel", (), ()),
-                    ),
-                ),
-                (
-                    "Fantasy",
-                    ("fantasy fiction", "fantasy general"),
-                    (
-                        ("Epic Fantasy", ("high fantasy",), ()),
-                        ("Urban Fantasy", (), ()),
-                        ("Cozy Fantasy", ("cosy fantasy",), ()),
-                        ("Magical Realism", (), ()),
-                    ),
-                ),
-                ("Horror", ("horror tales", "horror fiction", "horror general"), ()),
-            ),
+            "Psychological Fiction",
+            ("psychological", "psychological fiction", "psychological novel", "fiction psychological"),
+            (),
+        ),
+        ("Novel of Ideas", ("philosophical fiction", "philosophical novel", "novel of ideas"), ()),
+        ("Family Saga", ("family saga", "family sagas", "sagas", "domestic fiction"), ()),
+        (
+            "Coming of Age",
+            ("bildungsroman", "bildungsromans", "coming of age fiction", "coming of age stories"),
+            (),
+        ),
+        ("Social Novel", ("social novel", "social realism", "novel of manners", "social themes"), ()),
+        (
+            "Satire & Comic Fiction",
+            ("satire", "satirical fiction", "comic fiction", "humorous", "humorous fiction",
+             "humorous stories", "humor", "humour", "comedy"),
+            (),
+        ),
+        ("Autofiction", ("autobiographical fiction", "autobiographical"), ()),
+        (
+            "Experimental & Metafiction",
+            ("experimental", "experimental fiction", "experimental literature", "metafiction"),
+            (),
+        ),
+        ("Historical Fiction", ("historical", "historical novel", "historical fiction"), ()),
+        (
+            "War Fiction",
+            ("war stories", "war and military", "world war 1939 1945 fiction", "world war 1914 1918 fiction"),
+            (),
         ),
         (
-            "Literary Fiction",
-            ("literary", "literature", "lit fic", "litfic"),
-            (
-                ("Classics", ("classic", "classic literature"), ()),
-                ("Contemporary Fiction", ("contemporary",), ()),
-            ),
+            "Political & Dystopian",
+            ("political", "political fiction", "dystopia", "dystopias", "dystopian", "dystopian fiction"),
+            (),
+        ),
+        ("Magical Realism & Fabulism", ("magical realism", "magic realism", "fabulism"), ()),
+        ("Myth & Retellings", ("retellings", "myth retellings", "mythological fiction"), ()),
+        ("Love Stories", ("love stories", "love story", "romance", "romantic fiction"), ()),
+        (
+            "Crime & Mystery",
+            ("mystery", "mysteries", "crime", "crime fiction", "detective", "detective fiction",
+             "detective and mystery stories", "mystery and detective", "mystery and detective stories",
+             "whodunit", "whodunnit", "noir"),
+            (),
         ),
         (
-            "Mystery & Crime",
-            (
-                "mystery",
-                "mysteries",
-                "crime",
-                "crime fiction",
-                "detective",
-                "detective fiction",
-                "detective and mystery stories",
-                "mystery general",
-                "whodunit",
-                "whodunnit",
-            ),
-            (
-                ("Cozy Mystery", ("cozy mysteries", "cosy mystery"), ()),
-                (
-                    "Thriller",
-                    ("thrillers", "suspense", "thrillers general", "psychological thriller"),
-                    (),
-                ),
-            ),
+            "Thriller & Espionage",
+            ("thriller", "thrillers", "suspense", "suspense fiction", "psychological thriller", "espionage",
+             "spy stories", "spy fiction", "thrillers espionage"),
+            (),
         ),
-        ("Historical Fiction", ("historical", "historical novel", "historical general"), ()),
-        ("Romance", ("love stories", "romance general", "romantic fiction"), ()),
-        ("Humor", ("humour", "comedy", "humorous fiction", "humorous stories", "funny"), ()),
-        ("Adventure", ("adventure stories", "action and adventure", "action adventure"), ()),
         (
-            "History",
-            ("world history",),
-            (("Military History", ("ww2", "wwii", "world war ii", "ww1", "wwi"), ()),),
+            "Science Fiction",
+            ("sci fi", "scifi", "sf", "hard sf", "hard science fiction", "space opera", "cyberpunk",
+             "time travel"),
+            (),
         ),
+        (
+            "Fantasy",
+            ("fantasy fiction", "epic fantasy", "high fantasy", "urban fantasy", "cozy fantasy", "cosy fantasy"),
+            (),
+        ),
+        (
+            "Horror & Gothic",
+            ("horror", "horror tales", "horror fiction", "gothic", "gothic fiction", "ghost stories"),
+            (),
+        ),
+        ("Adventure", ("adventure stories", "action and adventure", "action adventure", "sea stories"), ()),
+        # Nonfiction
+        ("History", ("world history",), (("Economic History", ("economic history",), ()),)),
         (
             "Biography & Memoir",
-            ("biography", "biographies", "memoir", "memoirs", "autobiography", "autobiographies"),
+            ("biography", "biographies", "memoir", "memoirs", "autobiography", "autobiographies",
+             "biography and autobiography"),
             (),
         ),
         ("Philosophy", (), ()),
-        ("Religion & Spirituality", ("religion", "spirituality", "theology"), ()),
         (
-            "Science",
-            ("popular science", "pop science", "popsci", "pop sci"),
-            (
-                ("Physics", ("astronomy", "cosmology"), ()),
-                ("Biology", ("evolution", "genetics"), ()),
-                ("Mathematics", ("math", "maths"), ()),
-                ("Nature", ("natural history", "ecology", "environment"), ()),
-            ),
+            "Religion & Mythology",
+            ("religion", "spirituality", "theology", "mythology", "classical mythology", "greek mythology"),
+            (),
         ),
         ("Psychology", ("neuroscience",), ()),
         ("Politics & Society", ("politics", "political science", "sociology", "current affairs"), ()),
         ("Economics & Business", ("economics", "business", "finance", "management"), ()),
-        ("Self-Help", ("self help", "personal development", "productivity"), ()),
+        (
+            "Science & Nature",
+            ("science", "popular science", "pop science", "popsci", "pop sci", "natural history", "nature",
+             "ecology", "environment", "physics", "astronomy", "cosmology", "biology", "evolution",
+             "mathematics", "math", "maths"),
+            (),
+        ),
         ("Technology", ("computers", "programming", "computer science", "software"), ()),
-        ("Art & Design", ("art", "design", "architecture", "photography"), ()),
-        ("Food & Cooking", ("cooking", "cookbooks", "food"), ()),
-        ("Travel", ("travel writing",), ()),
+        (
+            "Art, Architecture & Design",
+            ("art", "design", "architecture", "photography", "art history"),
+            (),
+        ),
+        (
+            "Writing & Literature",
+            ("literary criticism", "books and reading", "authorship", "creative writing"),
+            (),
+        ),
+        ("Travel & Place", ("travel", "travel writing", "description and travel"), ()),
+    ),
+    # Literary traditions, matched from Open Library's "X literature/fiction"
+    # subjects. A book can belong to several (a Russian novel in translation).
+    "tradition": (
+        ("American", ("american literature", "american fiction"), ()),
+        (
+            "British & Irish",
+            ("english literature", "english fiction", "british literature", "british fiction",
+             "irish literature", "irish fiction", "scottish literature", "scottish fiction"),
+            (),
+        ),
+        (
+            "Continental European",
+            ("continental european fiction", "continental european literature", "european literature",
+             "european fiction", "romance literature", "french literature", "french fiction",
+             "german literature", "german fiction", "italian literature", "italian fiction",
+             "spanish literature", "spanish fiction", "scandinavian literature", "scandinavian fiction",
+             "polish literature", "czech literature", "portuguese literature"),
+            (),
+        ),
+        ("Russian", ("russian literature", "russian fiction", "soviet literature"), ()),
+        (
+            "Latin American",
+            ("latin american literature", "latin american fiction", "spanish american literature",
+             "spanish american fiction", "argentine literature", "mexican literature",
+             "colombian literature", "chilean literature", "brazilian literature"),
+            (),
+        ),
+        (
+            "Japanese & East Asian",
+            ("japanese literature", "japanese fiction", "chinese literature", "chinese fiction",
+             "korean literature", "korean fiction"),
+            (),
+        ),
+        ("Translated", ("translations into english", "translated fiction", "in translation", "translations"), ()),
+    ),
+    # Filled in from each book's original publication year (see ERA_YEARS).
+    "era": (
+        ("Ancient & Medieval", ("ancient", "medieval"), ()),
+        ("Early Modern", (), ()),
+        ("19th Century", ("nineteenth century",), ()),
+        ("Modernist", ("modernism",), ()),
+        ("Postwar", (), ()),
+        ("Contemporary", (), ()),
     ),
     "audience": (
         ("Young Adult", ("ya", "young adult fiction", "teen"), ()),
@@ -142,9 +212,37 @@ SEED: dict[str, tuple[_Node, ...]] = {
             (),
         ),
     ),
-    # Themes are the open vocabulary: moods, subjects and personal groupings.
-    # They start empty and grow from accepted shelf mappings and user edits.
-    "theme": (),
+    # What books are about, across fiction and nonfiction alike.
+    "theme": (
+        ("Family", ("family life", "families", "family relationships"), ()),
+        ("Love & Marriage", ("marriage", "married people", "man woman relationships", "love"), ()),
+        ("Friendship", ("friends",), ()),
+        ("Grief & Loss", ("grief", "bereavement", "loss psychology"), ()),
+        (
+            "War",
+            ("war", "military"),
+            (
+                ("World War I", ("world war 1914 1918", "ww1", "wwi", "first world war"), ()),
+                ("World War II", ("world war 1939 1945", "ww2", "wwii", "second world war"), ()),
+            ),
+        ),
+        (
+            "Writers & Artists",
+            ("authors", "writers", "novelists", "poets", "artists", "painters"),
+            (),
+        ),
+    ),
+}
+
+# Era buckets by original publication year, inclusive; keyed by seed slug.
+# A renamed or deleted era simply stops being filled in.
+ERA_YEARS: dict[str, tuple[int | None, int | None]] = {
+    "ancient-and-medieval": (None, 1499),
+    "early-modern": (1500, 1799),
+    "19th-century": (1800, 1899),
+    "modernist": (1900, 1945),
+    "postwar": (1946, 1989),
+    "contemporary": (1990, None),
 }
 
 
@@ -152,7 +250,7 @@ SEED: dict[str, tuple[_Node, ...]] = {
 # once, so each revision is replayed on older catalogues by upgrade_seed:
 # (facet, label) pairs whose aliases to add or remove. A category the user
 # renamed or deleted is simply skipped.
-SEED_REVISION = 2
+SEED_REVISION = 3
 _REVISIONS: dict[int, dict[str, tuple[tuple[str, str, str], ...]]] = {
     2: {
         # Over-broad Open Library subjects: "war" and "military" tag war
@@ -178,6 +276,30 @@ _REVISIONS: dict[int, dict[str, tuple[tuple[str, str, str], ...]]] = {
         ),
     },
 }
+
+# Revision 3 replaced the bookshop-style tree (Speculative Fiction > ...,
+# Literary Fiction > Classics) with descriptive fiction genres, and added the
+# tradition and era facets. Seed categories are renamed or moved into the new
+# shape; ones the new tree drops are removed only if the user never used them
+# (no rules, nothing they assigned), otherwise they stay where they are.
+_V3_RENAMES = (
+    ("Horror", "Horror & Gothic"),
+    ("Mystery & Crime", "Crime & Mystery"),
+    ("Thriller", "Thriller & Espionage"),
+    ("Magical Realism", "Magical Realism & Fabulism"),
+    ("Dystopian", "Political & Dystopian"),
+    ("Humor", "Satire & Comic Fiction"),
+    ("Romance", "Love Stories"),
+    ("Religion & Spirituality", "Religion & Mythology"),
+    ("Science", "Science & Nature"),
+    ("Art & Design", "Art, Architecture & Design"),
+    ("Travel", "Travel & Place"),
+)
+_V3_RETIRED = (
+    "Space Opera", "Cyberpunk", "Time Travel", "Epic Fantasy", "Urban Fantasy", "Cozy Fantasy",
+    "Speculative Fiction", "Classics", "Contemporary Fiction", "Literary Fiction", "Cozy Mystery",
+    "Military History", "Physics", "Biology", "Mathematics", "Nature", "Self-Help", "Food & Cooking",
+)
 
 
 def upgrade_seed(conn: sqlite3.Connection) -> list[str]:
@@ -205,12 +327,100 @@ def upgrade_seed(conn: sqlite3.Connection) -> list[str]:
                 """,
                 (alias, facet, label),
             )
+    if current < 3:
+        _restructure_v3(conn)
+        # The new tree changes what evidence matches: re-run the engine once
+        # (db.initialize does, after every migration has run).
+        conn.execute("INSERT OR REPLACE INTO adso_meta (key, value) VALUES ('taxonomy_recategorize', '1')")
     if current < SEED_REVISION:
         conn.execute(
             "INSERT OR REPLACE INTO adso_meta (key, value) VALUES ('taxonomy_seed_rev', ?)",
             (str(SEED_REVISION),),
         )
     return removed
+
+
+def _seed_category(conn: sqlite3.Connection, facet: str, label: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT id, parent_id FROM categories WHERE facet = ? AND label = ? AND origin = 'seed' "
+        "ORDER BY id LIMIT 1",
+        (facet, label),
+    ).fetchone()
+
+
+def _slug_free(conn: sqlite3.Connection, facet: str, parent_id: int | None, slug: str, own_id: int) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM categories WHERE facet = ? AND COALESCE(parent_id, 0) = ? AND slug = ? AND id != ?",
+        (facet, parent_id or 0, slug, own_id),
+    ).fetchone() is None
+
+
+def _restructure_v3(conn: sqlite3.Connection) -> None:
+    from .categorize import _purge_category  # categorize imports this module
+
+    for old, new in _V3_RENAMES:
+        row = _seed_category(conn, "genre", old)
+        if row is not None and _slug_free(conn, "genre", row["parent_id"], slugify(new), row["id"]):
+            conn.execute("UPDATE categories SET label = ?, slug = ? WHERE id = ?", (new, slugify(new), row["id"]))
+
+    # Retire unused old categories, deepest first; their children move up.
+    for label in _V3_RETIRED:
+        row = _seed_category(conn, "genre", label)
+        if row is None:
+            continue
+        used = conn.execute(
+            "SELECT 1 FROM category_rules WHERE category_id = ? UNION ALL "
+            "SELECT 1 FROM book_categories WHERE category_id = ? AND source = 'user' LIMIT 1",
+            (row["id"], row["id"]),
+        ).fetchone()
+        if used:
+            # Kept, but no longer the match for words the new tree places elsewhere.
+            for alias in _all_aliases():
+                conn.execute(
+                    "DELETE FROM category_aliases WHERE category_id = ? AND alias = ?", (row["id"], alias)
+                )
+            continue
+        conn.execute("UPDATE categories SET parent_id = ? WHERE parent_id = ?", (row["parent_id"], row["id"]))
+        _purge_category(conn, row["id"])
+
+    # Put every seed node in its new place, add the new ones, refresh aliases.
+    for facet, nodes in SEED.items():
+        _reconcile(conn, facet, nodes, parent_id=None)
+
+
+def _all_aliases() -> set[str]:
+    out: set[str] = set()
+
+    def walk(nodes: tuple[_Node, ...]) -> None:
+        for _label, aliases, children in nodes:
+            out.update(aliases)
+            walk(children)
+
+    for nodes in SEED.values():
+        walk(nodes)
+    return out
+
+
+def _reconcile(conn: sqlite3.Connection, facet: str, nodes: tuple[_Node, ...], *, parent_id: int | None) -> None:
+    for position, node in enumerate(nodes):
+        label, aliases, children = node
+        row = _seed_category(conn, facet, label)
+        if row is None:
+            if conn.execute("SELECT 1 FROM categories WHERE facet = ? AND label = ?", (facet, label)).fetchone():
+                continue  # the user made their own; leave theirs alone
+            if not _slug_free(conn, facet, parent_id, slugify(label), 0):
+                continue
+            _insert_node(conn, facet, node, parent_id=parent_id, position=position)
+            continue
+        category_id = int(row["id"])
+        if row["parent_id"] != parent_id and _slug_free(conn, facet, parent_id, slugify(label), category_id):
+            conn.execute("UPDATE categories SET parent_id = ? WHERE id = ?", (parent_id, category_id))
+        conn.execute("UPDATE categories SET position = ? WHERE id = ?", (position, category_id))
+        for alias in aliases:
+            conn.execute(
+                "INSERT OR IGNORE INTO category_aliases (category_id, alias) VALUES (?, ?)", (category_id, alias)
+            )
+        _reconcile(conn, facet, children, parent_id=category_id)
 
 
 def slugify(label: str) -> str:

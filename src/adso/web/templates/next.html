@@ -9,10 +9,10 @@
 
 <form method="get" action="/next" class="card mb-8">
   <section class="flex flex-wrap items-end gap-3 pt-2">
-    <label class="grid gap-1 text-sm">Genre
+    <label class="grid gap-1 text-sm">Category
       <select name="category" class="select">
         <option value="">Any</option>
-        {% for c in choices if c.facet in ("genre", "theme") and c.total %}
+        {% for c in choices if c.facet in ("genre", "tradition", "era", "theme") and c.total %}
         <option value="{{ c.ref }}" {{ "selected" if c.ref == f.category }}>{{ c.display }}</option>
         {% endfor %}
       </select>
