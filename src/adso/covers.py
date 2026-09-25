@@ -195,20 +195,33 @@ def cover_thumbnail(src: str | Path, *, max_px: int = THUMB_MAX_PX) -> Path | No
 
     Thumbnails live in ``<covers dir>/.thumbs/<max_px>/`` and are rebuilt when
     the cover is newer than its thumbnail. They are made with Pillow if it
-    happens to be installed, else macOS ``sips``; with neither (or on any
-    failure) this returns None and callers serve the original cover.
+    happens to be installed, else macOS ``sips``. Returns None — meaning
+    "serve the original" — when the cover is already no larger than
+    ``max_px``, when a thumbnail would come out no smaller in bytes than the
+    cover itself (a small, heavily compressed original), when no backend is
+    available, or on any failure. The "would be bigger" verdict is remembered
+    with a ``.skip`` marker so the work isn't repeated on every request.
     """
     src = Path(src)
     try:
-        src_mtime = src.stat().st_mtime
+        src_stat = src.stat()
     except OSError:
         return None
+    size = image_size(src)
+    if size and max(size) <= max_px:
+        return None  # already thumbnail-sized; scaling would only enlarge it
     dest = src.parent / THUMB_DIR / str(max_px) / f"{src.stem}-{src.suffix.lstrip('.')}.jpg"
-    try:
-        if dest.stat().st_mtime >= src_mtime:
-            return dest
-    except OSError:
-        pass
+    skip = dest.with_name(dest.name + ".skip")
+    for cached, result in ((dest, dest), (skip, None)):
+        try:
+            cached_stat = cached.stat()
+        except OSError:
+            continue
+        if cached_stat.st_mtime >= src_stat.st_mtime:
+            # A thumbnail cached before the size check existed may be bigger.
+            if result is dest and cached_stat.st_size >= src_stat.st_size:
+                return None
+            return result
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         # Write to a temp file and rename, so a concurrent request never
@@ -220,7 +233,12 @@ def cover_thumbnail(src: str | Path, *, max_px: int = THUMB_MAX_PX) -> Path | No
             made = _pillow_thumbnail(src, tmp, max_px) or _sips_thumbnail(src, tmp, max_px)
             if not made:
                 return None
+            if tmp.stat().st_size >= src_stat.st_size:
+                skip.touch()
+                dest.unlink(missing_ok=True)
+                return None
             os.replace(tmp, dest)
+            skip.unlink(missing_ok=True)
         finally:
             tmp.unlink(missing_ok=True)
     except (OSError, subprocess.SubprocessError, ValueError):
