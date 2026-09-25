@@ -302,6 +302,14 @@ class CoverThumbnailTests(unittest.TestCase):
             covers.cover_thumbnail(self.src)
             self.assertEqual(len(calls), 2)
 
+    def test_previously_cached_oversized_thumbnail_is_not_served(self) -> None:
+        thumbs = Path(self.tmp.name) / ".thumbs" / "360"
+        thumbs.mkdir(parents=True)
+        (thumbs / "42-png.jpg").write_bytes(b"x" * 100)  # newer and bigger than the cover
+        from adso.covers import cover_thumbnail
+
+        self.assertIsNone(cover_thumbnail(self.src))
+
     def test_missing_cover_returns_none(self) -> None:
         from adso.covers import cover_thumbnail
 

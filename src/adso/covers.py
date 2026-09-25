@@ -214,10 +214,14 @@ def cover_thumbnail(src: str | Path, *, max_px: int = THUMB_MAX_PX) -> Path | No
     skip = dest.with_name(dest.name + ".skip")
     for cached, result in ((dest, dest), (skip, None)):
         try:
-            if cached.stat().st_mtime >= src_stat.st_mtime:
-                return result
+            cached_stat = cached.stat()
         except OSError:
-            pass
+            continue
+        if cached_stat.st_mtime >= src_stat.st_mtime:
+            # A thumbnail cached before the size check existed may be bigger.
+            if result is dest and cached_stat.st_size >= src_stat.st_size:
+                return None
+            return result
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         # Write to a temp file and rename, so a concurrent request never
