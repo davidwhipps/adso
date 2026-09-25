@@ -4,10 +4,11 @@
    - assign: a genre for particular books: Adso's "Open Library calls these
      novels History" questions (grouped per genre), or an agent's proposal.
    - primary: which of a book's genres leads.
-   Every button swaps this card in place. Expects `card`, `choices`. #}
+   Every button swaps this card in place. Expects `card`, `choices`, optional `error`. #}
 {% set sid = card.id %}
 {% set target = "#catcard-" ~ sid %}
 <div id="catcard-{{ sid }}" class="card catcard">
+  {% if error %}<p class="cat-err mb-2" role="alert">{{ error }}</p>{% endif %}
   {% if card.kind == "map" %}
   <header class="flex flex-wrap items-baseline justify-between gap-2">
     <h3 class="font-medium">{{ card.target }}</h3>

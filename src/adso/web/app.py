@@ -790,6 +790,32 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
             request, "_category_card_resolved.html", {"card_id": card_id, "message": message, **_nav_ctx(conn)}
         )
 
+    def _card_error(
+        request: Request, conn: sqlite3.Connection, suggestion_id: int, exc: Exception
+    ) -> HTMLResponse:
+        """Show why a decision didn't go through, in the card's own slot.
+
+        A card the page shows may already be settled: deciding another card
+        re-checks the queue and can withdraw it. That collapses the card with
+        an explanation; any other problem re-renders the card with the error.
+        """
+        row = conn.execute("SELECT status FROM category_suggestions WHERE id = ?", (suggestion_id,)).fetchone()
+        if row is None or row["status"] != "pending":
+            why = {
+                "superseded": "withdrawn, because its source no longer points at a category you can map to",
+                "accepted": "already accepted",
+                "rejected": "already rejected",
+            }.get(row["status"] if row else "", "no longer open")
+            return _card_after(request, conn, suggestion_id, [], f"Nothing to do: this suggestion was {why}.")
+        for card in categorize_service.list_suggestion_cards(conn):
+            if any(m["id"] == suggestion_id for m in card["members"]):
+                return templates.TemplateResponse(
+                    request, "_category_card.html",
+                    {"card": _with_options(conn, card), "choices": categorize_service.category_choices(conn),
+                     "error": str(exc)},
+                )
+        raise HTTPException(status_code=400, detail=str(exc))
+
     @app.post("/categories/suggestions/{suggestion_id}/accept", response_class=HTMLResponse)
     def accept_category_suggestion(
         request: Request,
@@ -804,7 +830,7 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
                 conn, suggestion_id, as_category=as_category.strip() or None, only=bool(only), actor="web"
             )
         except categorize_service.CategoryError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
+            return _card_error(request, conn, suggestion_id, exc)
         if outcome["kind"] == "map":
             message = (
                 f"Mapped to {outcome['category']}: now on {outcome['books']} book(s), "
@@ -828,7 +854,7 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
             members = categorize_service.suggestion_group(conn, suggestion_id)
             item = categorize_service.reject_suggestion(conn, suggestion_id, only=bool(only), actor="web")
         except categorize_service.CategoryError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
+            return _card_error(request, conn, suggestion_id, exc)
         if item["kind"] == "primary":
             message = f"Rejected {item['target']} as the primary genre."
         else:

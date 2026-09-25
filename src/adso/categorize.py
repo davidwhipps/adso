@@ -999,7 +999,10 @@ def add_rule(
 
 def _mapping_target(taxonomy: Taxonomy, reference: str) -> Category:
     """The category a shelf, subject or tag may be mapped to."""
-    category = taxonomy.resolve(reference)
+    return _require_mappable(taxonomy, taxonomy.resolve(reference))
+
+
+def _require_mappable(taxonomy: Taxonomy, category: Category) -> Category:
     if category.facet in UNMAPPABLE_FACETS:
         raise CategoryError(
             f"{taxonomy.display(category.id)} comes from each book's publication year, so nothing maps to it",
@@ -1188,7 +1191,10 @@ def categorize(conn: sqlite3.Connection, *, dry_run: bool = False) -> dict[str, 
         key = (rule["match_kind"], rule["match_value"])
         if rule["tag"]:
             tag_rules[key].append((rule["id"], rule["tag"]))
-        elif rule["category_id"] in taxonomy.by_id:
+        elif (
+            rule["category_id"] in taxonomy.by_id
+            and taxonomy.get(rule["category_id"]).facet not in UNMAPPABLE_FACETS
+        ):
             category_rules[key].append((rule["id"], rule["category_id"]))
     applied = {(row[0], row[1]) for row in conn.execute("SELECT rule_id, book_id FROM tag_rule_applications")}
     exclusions = {
@@ -2047,6 +2053,8 @@ def accept_suggestion(
         category_id = taxonomy.resolve(as_category, facet=facet).id
     elif row["category_id"] is not None:
         category_id = row["category_id"]
+        if row["kind"] == "map" and category_id in taxonomy.by_id:
+            _require_mappable(taxonomy, taxonomy.get(category_id))
     elif row["proposed_label"]:
         facet = row["proposed_facet"] or "theme"
         found = conn.execute(
