@@ -839,6 +839,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--as", dest="as_category", metavar="CATEGORY", help="Accept, but map to this category instead"
     )
     review_parser.add_argument(
+        "--only",
+        action="store_true",
+        help="Act on this one source instead of its whole card (e.g. reject one bad subject)",
+    )
+    review_parser.add_argument(
         "--all", action="store_true", help="Also list decided suggestions (accepted and rejected)"
     )
 
@@ -1239,34 +1244,44 @@ def _run_review(conn, args) -> int:
     if args.suggestion_id is None:
         if args.accept or args.reject or args.reopen or args.as_category:
             raise AdsoError("Give a suggestion ID to decide", hint="Run `adso review` to list them.")
-        print(_format_suggestions(categorize_service.list_suggestions(conn)))
+        print(_format_suggestions(categorize_service.list_suggestion_cards(conn)))
         if args.all:
             for status in ("accepted", "rejected"):
-                decided = categorize_service.list_suggestions(conn, status=status)
+                decided = categorize_service.list_suggestion_cards(conn, status=status)
                 if decided:
                     print("")
                     print(_format_suggestions(decided, heading=f"{status.capitalize()} suggestions"))
         return 0
     if args.reject:
-        item = categorize_service.reject_suggestion(conn, args.suggestion_id)
-        print(f"Rejected [{item['id']}] {item['subject']} → {item['target']}")
+        item = categorize_service.reject_suggestion(conn, args.suggestion_id, only=args.only)
+        print(f"Rejected {_sources_phrase(item)} → {item['target']}")
         return 0
     if args.reopen:
-        item = categorize_service.reopen_suggestion(conn, args.suggestion_id)
-        print(f"Reopened [{item['id']}] {item['subject']} → {item['target']}")
+        item = categorize_service.reopen_suggestion(conn, args.suggestion_id, only=args.only)
+        print(f"Reopened {_sources_phrase(item)} → {item['target']}")
         return 0
     if not (args.accept or args.as_category):
         raise AdsoError(
             "Say what to do with the suggestion",
             hint=f"`adso review {args.suggestion_id} --accept`, `--as CATEGORY` or `--reject`.",
         )
-    outcome = categorize_service.accept_suggestion(conn, args.suggestion_id, as_category=args.as_category)
+    outcome = categorize_service.accept_suggestion(
+        conn, args.suggestion_id, as_category=args.as_category, only=args.only
+    )
     if outcome["kind"] == "primary":
         print(f"Primary genre set: {outcome['category']}")
     else:
-        print(f"Mapped to {outcome['category']}: now applied to {outcome['books']} book(s).")
+        sources = f" ({outcome['sources']} sources)" if outcome["sources"] > 1 else ""
+        print(f"Mapped to {outcome['category']}{sources}: now applied to {outcome['books']} book(s).")
         _print_run_followups(outcome["run"])
     return 0
+
+
+def _sources_phrase(item: dict[str, object]) -> str:
+    if item["kind"] == "primary":
+        return f"[{item['id']}] {item['subject']}"
+    sources = int(item.get("sources") or 1)
+    return f"[{item['id']}] {item['subject']}" + (f" and {sources - 1} more source(s)" if sources > 1 else "")
 
 
 def _run_taxonomy(conn, args) -> int:
@@ -1359,36 +1374,49 @@ def _format_categorize_result(result: dict[str, int], *, dry_run: bool) -> str:
     return "\n".join(lines)
 
 
-def _format_suggestions(items: list[dict[str, object]], *, heading: str | None = None) -> str:
-    if not items:
+_SHORT_KIND = {"shelf": "shelf", "subject": "subject", "tag": "tag"}
+
+
+def _format_suggestions(cards: list[dict[str, object]], *, heading: str | None = None) -> str:
+    if not cards:
         return "No open suggestions. Run `adso categorize` after a sync or metadata fetch."
-    maps = [item for item in items if item["kind"] == "map"]
-    primaries = [item for item in items if item["kind"] == "primary"]
+    maps = [card for card in cards if card["kind"] == "map"]
+    primaries = [card for card in cards if card["kind"] == "primary"]
     lines: list[str] = []
     if heading:
         lines += [heading, "-" * len(heading)]
     if maps:
         lines.append("Mappings — decide once, applies to every matching book now and after each sync")
-        for item in maps:
+        for card in maps:
             lines.append(
-                f"  [{item['id']}] {item['subject']} ({item['book_count']} book(s)) → {item['target']}"
-                f"  {int(float(item['confidence']) * 100)}%"
+                f"  [{card['id']}] {card['target']} — {card['book_count']} book(s)"
+                f"  {int(float(card['confidence']) * 100)}%"
             )
-            if item.get("evidence"):
-                lines.append(f"       {item['evidence']}")
+            members = card["members"]  # type: ignore[index]
+            if len(members) == 1:
+                member = members[0]
+                lines.append(f'       from {_SHORT_KIND.get(member["match_kind"], member["match_kind"])} "{member["match_value"]}"')
+            else:
+                sources = ", ".join(
+                    f'{_SHORT_KIND.get(m["match_kind"], m["match_kind"])} "{m["match_value"]}" ({m["book_count"]}) [{m["id"]}]'
+                    for m in members
+                )
+                lines.append(f"       from {sources}")
+            if card.get("evidence"):
+                lines.append(f"       {card['evidence']}")
     if primaries:
         if lines:
             lines.append("")
-        lines.append("Primary genre — the book has several; which one leads?")
-        for item in primaries:
-            lines.append(f"  [{item['id']}] {item['subject']} → {item['target']}")
-            if item.get("evidence"):
-                lines.append(f"       {item['evidence']}")
+        lines.append("Primary genre — the book's genres don't share a parent; which one leads?")
+        for card in primaries:
+            lines.append(f"  [{card['id']}] {card['subject']} → {card['target']}")
+            if card.get("evidence"):
+                lines.append(f"       {card['evidence']}")
     if not heading:
         lines.append("")
         lines.append(
-            "Decide with `adso review ID --accept`, `adso review ID --as \"Genre > Path\"` "
-            "or `adso review ID --reject`."
+            "Decide a card with `adso review ID --accept`, `--as \"Genre > Path\"` or `--reject`; "
+            "add `--only` to act on just that one source."
         )
     return "\n".join(lines)
 
@@ -1425,7 +1453,7 @@ def _format_rules(rules: list[dict[str, object]]) -> str:
     return "\n".join(lines)
 
 
-_SOURCE_LABELS = {"user": "you", "rule": "rule", "suggestion": "suggestion"}
+_SOURCE_LABELS = {"user": "you", "rule": "rule", "derived": "default"}
 
 
 def _format_book_categories(data: dict[str, object]) -> str:

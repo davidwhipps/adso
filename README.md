@@ -156,15 +156,16 @@ Goodreads exports carry no genres, only your own shelves. Adso builds a proper c
 
 - **Facets:** form (fiction, nonfiction, poetry…), genre, audience and theme. Genre is a tree, so filtering by *Speculative Fiction* includes *Science Fiction > Space Opera*. Each book has at most one **primary genre** plus any number of secondary categories.
 - **A starter taxonomy** is seeded once. After that it's yours: rename, move, merge, delete and add aliases with `adso taxonomy`.
-- **Suggestions, never silent changes.** `adso categorize` (also run after every sync) turns your custom Goodreads shelves, Open Library subjects and tags into proposals such as *shelf `cozy-fantasy` (14 books) → Genre: Fantasy > Cozy Fantasy*. Accepting one creates a rule that applies to every matching book now and to new books on each later sync, so you decide once per shelf, not once per book. Rejected proposals never come back.
+- **Suggestions, never silent changes.** `adso categorize` (also run after every sync) turns your custom Goodreads shelves, Open Library subjects and tags into proposals such as *shelf `cozy-fantasy` (14 books) → Genre: Fantasy > Cozy Fantasy*. Accepting one creates a rule that applies to every matching book now and to new books on each later sync, so you decide once per shelf, not once per book. Proposals that point at the same category arrive as one card: your `horror` shelf and Open Library's "Horror tales" and "Fiction, horror" are one decision (add `--only` to act on a single source). Rejected proposals never come back.
 - **Your edits win.** Categories you set by hand are never touched by a run. Removing a category from a book stops rules from adding it back. Rule-made categories follow their evidence, so removing a shelf on Goodreads removes the category it brought.
-- **Primary genres settle themselves** when a book has one most-specific genre. When genres compete, you get one question per book.
+- **Primary genres settle themselves** where the evidence allows: the one most-specific genre; else the genre from your own shelf over one from Open Library; else the parent that the competing genres share (Cyberpunk + Space Opera → Science Fiction). Only genuinely different genres (say, History vs Romance) become a question, one per book. Any automatic pick can be overridden with `adso edit --genre`.
 - **Series** and reading order are read from Goodreads titles ("Leviathan Wakes (The Expanse, #1)"). You can override them by hand.
 
 ```bash
 adso categorize                          # apply rules, raise suggestions (--dry-run to preview)
 adso review                              # open suggestions, highest-leverage first
-adso review 12 --accept                  # or --as "Fantasy > Cozy Fantasy", --reject, --reopen
+adso review 12 --accept                  # the whole card; or --as "Fantasy > Cozy Fantasy", --reject, --reopen
+adso review 54 --only --reject           # just one source on a card
 adso taxonomy list --used                # the tree with book counts
 adso taxonomy add "theme:Found family"   # or "Fantasy > Grimdark"
 adso taxonomy map --shelf favorites --to "theme:Favourites"

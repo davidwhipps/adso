@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Less manual categorisation review.** On a 1,000-book test library this cut review
+  items from 71 to 37, mapping decisions from 50 to 23, and primary-genre questions
+  from 152 to 53.
+  - `adso review` groups proposals that point at the same category into one card, so
+    a shelf and every Open Library spelling of that genre are one decision. `--only`
+    acts on a single source.
+  - Primary genres are picked automatically when a book's own shelves settle it, or
+    when its competing genres share a parent (Cyberpunk + Space Opera → Science
+    Fiction). Automatic picks stay provisional and can be overridden.
+  - Categories whose accepted mapping was deleted are asked about again.
+  - Date and book-club shelves are no longer proposed.
+  - Common shelf spellings (lit-fic, whodunnit, popsci, ww2, hard-sf) now match
+    genres.
+
 ### Added
 - **Categories, reviewed suggestions and series** (`adso categorize`, `adso review`,
   `adso taxonomy`). Books are organised along facets (form, genre, audience,
