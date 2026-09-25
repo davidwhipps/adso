@@ -161,6 +161,12 @@ Each book goes through a pipeline of pluggable "suggesters". Each suggester retu
    - `recommend.py`: a taste profile from ratings over genre/theme/tag/subject/author features (idf-weighted, shrunk toward neutral), `next_reads` with series order, owned and community nudges, a variety pass and reasons, `explore_paths`, `related_books` and `insights`.
    - Surfaces: CLI `next`/`related`/`insights`, the web `/next` page and Related strip, `/api/next`, and four MCP tools.
    - Explicit `book_relations` (companion, responds-to) is left for later; series and similarity cover the common cases.
+5. **A reader's taxonomy** (seed revision 3), after reviewing the starter tree against a real library:
+   - Flat, descriptive fiction genres replace Speculative Fiction and the Literary Fiction > Classics catch-all. Subgenres are left to the user.
+   - New facets: **tradition** (proposed from Open Library "X literature/fiction" subjects) and **era** (automatic from the original publication year, source `year`).
+   - Seeded themes, with WWII as a theme under War.
+   - Upgrade reshapes older catalogues once: renames and moves seed categories, removes unused old ones, keeps any the user used, then re-runs `categorize`.
+   - Noise subjects are ignored; custom DNF shelves count as DNF; a shortlist shelf or tag nudges Next up.
 
 ## Critical files
 

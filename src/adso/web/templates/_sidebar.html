@@ -1,4 +1,4 @@
-{# Library sidebar: shelves, smart views, genres, themes and tags, each with
+{# Library sidebar: shelves, smart views, genres, traditions, eras, themes and tags, each with
    the count that clicking it would show. Custom Goodreads shelves aren't a
    section of their own: they feed genres and tags through Review. Links are
    boosted by #browse. Expects `lib`, `p`. #}
@@ -23,14 +23,14 @@
   <p class="side-note">No genres yet. Review the suggestions under <a href="/review#categories" hx-boost="false">Review</a> to sort your shelves into genres.</p>
   {% endfor %}
 
-  {% if lib.themes %}
-  <h5><i>04</i>Themes</h5>
-  {% for f in lib.themes %}
+  {% for title, facets in (("Traditions", lib.traditions), ("Eras", lib.eras), ("Themes", lib.themes)) if facets %}
+  <h5><i>{{ "%02d" | format(loop.index + 3) }}</i>{{ title }}</h5>
+  {% for f in facets %}
   <a href="{{ f.url }}" class="nav {{ 'on' if f.active }} {{ 'zero' if not f.count }} {{ 'sub' if f.depth }}" style="--depth: {{ f.depth }}">{{ f.label }}<span class="n">{{ f.count }}</span></a>
   {% endfor %}
-  {% endif %}
+  {% endfor %}
 
-  <h5><i>05</i>Tags</h5>
+  <h5><i>{{ "%02d" | format(4 + ([lib.traditions, lib.eras, lib.themes] | select | list | length)) }}</i>Tags</h5>
   {% if lib.tags | length > 8 %}
   <input class="tagfilter" id="tagfilter" placeholder="Filter tags" aria-label="Filter tags" hx-boost="false">
   {% endif %}

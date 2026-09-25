@@ -1,6 +1,7 @@
 """Categorisation: the taxonomy, the suggestion engine, and human review.
 
-Adso organises books along a few fixed facets (form, genre, audience, theme).
+Adso organises books along a few fixed facets (form, genre, tradition, era,
+audience, theme).
 Genre is a hierarchy, and each book has at most one *primary* genre plus any
 number of secondary categories. The vocabulary is seeded from
 ``taxonomy_seed`` and then belongs to the user.
@@ -27,11 +28,18 @@ from dataclasses import dataclass
 from typing import Any
 
 from .errors import AdsoError
-from .taxonomy_seed import FACET_LABELS, FACETS, slugify
+from .taxonomy_seed import ERA_YEARS, FACET_LABELS, FACETS, slugify
 
 # Exclusive shelves describe reading state, not what a book is about.
 STATUS_SHELVES = frozenset(
     {"read", "to-read", "currently-reading", "did-not-finish", "dnf"}
+)
+
+# Custom shelves people use for "did not finish". Like the status shelves they
+# describe reading state, so they never raise a proposal; recommendations
+# count them as DNF.
+DNF_SHELF_TERMS = frozenset(
+    {"did not finish", "dnf", "abandoned", "attempted", "gave up", "unfinished", "not finished"}
 )
 
 # Common Goodreads shelves that describe ownership or logistics rather than
@@ -79,6 +87,21 @@ _DATED_SHELF_RE = re.compile(r"^(?:read )?(?:in )?(?:19|20)\d\d(?: reads?| books
 def _is_non_category_shelf(value: str) -> bool:
     return value in NON_CATEGORY_SHELVES or bool(_DATED_SHELF_RE.match(value))
 
+
+# Open Library subjects that describe the edition, a list the book was on or a
+# reading level rather than the book: never evidence for a category or a taste.
+_NOISE_SUBJECT_RE = re.compile(
+    r"^(?:new york times|nyt |long now manual|open syllabus|reading level|amerikanisches|"
+    r"accessible book|protected daisy|in library|lending library|large type|popular print disabled|"
+    r"internet archive|staff picks|general$)"
+)
+
+
+def is_noise_subject(term: str) -> bool:
+    """True for a normalised subject that says nothing about the book."""
+    return bool(_NOISE_SUBJECT_RE.match(term))
+
+
 MATCH_KINDS = ("shelf", "subject", "tag")
 MATCH_KIND_LABELS = {
     "shelf": "Goodreads shelf",
@@ -94,7 +117,9 @@ CONFIDENCE_NEW_THEME = 0.5
 CONFIDENCE_PRIMARY = 0.6
 
 # Facet preference when one term matches categories in several facets.
-_FACET_ORDER = {facet: index for index, facet in enumerate(("genre", "form", "audience", "theme"))}
+_FACET_ORDER = {
+    facet: index for index, facet in enumerate(("genre", "form", "tradition", "audience", "theme", "era"))
+}
 
 _EXAMPLE_TITLES = 3
 
@@ -274,6 +299,12 @@ class Taxonomy:
             ]
         if not candidates:
             raise CategoryError(f"No category matches {text!r}")
+        if len(candidates) > 1:
+            # A subgenre carrying its parent's alias ("space opera" on Science
+            # Fiction and on its Space Opera child): the more specific wins.
+            deepest = max(candidates, key=lambda c: self.depth(c.id))
+            if all(c.id == deepest.id or self.is_ancestor(c.id, deepest.id) for c in candidates):
+                return deepest
         if len(candidates) > 1:
             options = "; ".join(sorted(self.display(c.id) for c in candidates))
             raise CategoryError(
@@ -1017,12 +1048,12 @@ def _book_signals(book: sqlite3.Row) -> dict[tuple[str, str], str]:
     exclusive = normalize_term(book["exclusive_shelf"] or "")
     for shelf in json.loads(book["shelves_json"] or "[]"):
         value = normalize_term(shelf)
-        if not value or shelf in STATUS_SHELVES or value == exclusive:
+        if not value or shelf in STATUS_SHELVES or value == exclusive or value in DNF_SHELF_TERMS:
             continue
         signals.setdefault(("shelf", value), shelf)
     for subject in json.loads(book["subjects_json"] or "[]"):
         value = normalize_term(subject)
-        if value:
+        if value and not is_noise_subject(value):
             signals.setdefault(("subject", value), subject)
     for tag in json.loads(book["tags_json"] or "[]"):
         value = normalize_term(tag)
@@ -1031,7 +1062,8 @@ def _book_signals(book: sqlite3.Row) -> dict[tuple[str, str], str]:
     return signals
 
 
-# Top-level seed genres that are nonfiction. An Open Library subject alone
+# Top-level seed genres that are nonfiction (older seed slugs included, for
+# catalogues that kept them). An Open Library subject alone
 # can't put a novel in one of these (OL tags novels "history", "war",
 # "biography"...): that becomes a question instead. Keyed by slug so a
 # renamed category keeps its meaning only if the user kept the slug's words.
@@ -1040,16 +1072,21 @@ NONFICTION_GENRE_ROOTS = frozenset(
         "history",
         "biography-and-memoir",
         "philosophy",
+        "religion-and-mythology",
         "religion-and-spirituality",
-        "science",
         "psychology",
         "politics-and-society",
         "economics-and-business",
-        "self-help",
+        "science-and-nature",
+        "science",
         "technology",
+        "art-architecture-and-design",
         "art-and-design",
-        "food-and-cooking",
+        "writing-and-literature",
+        "travel-and-place",
         "travel",
+        "self-help",
+        "food-and-cooking",
     }
 )
 
@@ -1066,6 +1103,56 @@ def _form_id(taxonomy: Taxonomy, slug: str) -> int | None:
     return next((c.id for c in taxonomy.by_id.values() if c.facet == "form" and c.slug == slug), None)
 
 
+def _era_for_year(taxonomy: Taxonomy, year: int | None) -> int | None:
+    if year is None:
+        return None
+    for category in taxonomy.by_id.values():
+        if category.facet != "era" or category.slug not in ERA_YEARS:
+            continue
+        low, high = ERA_YEARS[category.slug]
+        if (low is None or year >= low) and (high is None or year <= high):
+            return category.id
+    return None
+
+
+def _apply_era(
+    conn: sqlite3.Connection,
+    taxonomy: Taxonomy,
+    book: sqlite3.Row,
+    existing: dict[int, sqlite3.Row],
+    exclusions: set[tuple[int, int]],
+) -> tuple[int, int]:
+    """Keep a book's era in line with its original publication year.
+
+    Year-made rows follow the year; an era the user chose wins, and one they
+    removed isn't put back. Returns (added, removed).
+    """
+    eras = {cid: row for cid, row in existing.items() if taxonomy.by_id[cid].facet == "era"}
+    wanted = _era_for_year(taxonomy, book["original_publication_year"])
+    if (wanted is not None and (book["id"], wanted) in exclusions) or any(
+        row["source"] != "year" for row in eras.values()
+    ):
+        wanted = None
+    eras = {cid: row for cid, row in eras.items() if row["source"] == "year"}
+    removed = 0
+    for category_id in eras:
+        if category_id != wanted:
+            conn.execute(
+                "DELETE FROM book_categories WHERE book_id = ? AND category_id = ?", (book["id"], category_id)
+            )
+            removed += 1
+    if wanted is None or wanted in eras:
+        return 0, removed
+    conn.execute(
+        """
+        INSERT INTO book_categories (book_id, category_id, role, source, evidence)
+        VALUES (?, ?, 'secondary', 'year', ?)
+        """,
+        (book["id"], wanted, f"First published {book['original_publication_year']}"),
+    )
+    return 1, removed
+
+
 def categorize(conn: sqlite3.Connection, *, dry_run: bool = False) -> dict[str, int]:
     """Apply accepted rules, parse series, settle primaries, raise new proposals.
 
@@ -1076,7 +1163,8 @@ def categorize(conn: sqlite3.Connection, *, dry_run: bool = False) -> dict[str, 
     conn.commit()  # never roll back someone else's pending work on dry_run
     taxonomy = Taxonomy(conn)
     books = conn.execute(
-        "SELECT id, title, date_added, exclusive_shelf, shelves_json, subjects_json, tags_json FROM books"
+        "SELECT id, title, date_added, exclusive_shelf, shelves_json, subjects_json, tags_json, "
+        "original_publication_year FROM books"
     ).fetchall()
 
     category_rules: dict[tuple[str, str], list[tuple[int, int]]] = defaultdict(list)
@@ -1128,7 +1216,10 @@ def categorize(conn: sqlite3.Connection, *, dry_run: bool = False) -> dict[str, 
                         (rule_id, book["id"]),
                     )
 
-        existing = current.get(book["id"], {})
+        existing = {cid: row for cid, row in current.get(book["id"], {}).items() if cid in taxonomy.by_id}
+        era_added, era_removed = _apply_era(conn, taxonomy, book, existing, exclusions)
+        assigned += era_added
+        removed += era_removed
         # A novel isn't History just because Open Library says "history": a
         # nonfiction genre that only subjects support becomes a question.
         chosen = set(desired) | {cid for cid, row in existing.items() if row["source"] != "rule"}

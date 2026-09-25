@@ -21,7 +21,7 @@
     <div class="cat-chips">
       {% for e in entries %}
       {% set ref = e.facet ~ ":" ~ e.path %}
-      {% set why = "Set by you" if e.source == "user" else ("Default — " ~ e.evidence if e.source == "derived" else ("From " ~ e.evidence if e.evidence else "From a rule")) %}
+      {% set why = "Set by you" if e.source == "user" else ("Default — " ~ e.evidence if e.source == "derived" else (e.evidence if e.source == "year" else ("From " ~ e.evidence if e.evidence else "From a rule"))) %}
       <span class="catchip {{ 'primary' if e.role == 'primary' }} src-{{ e.source }}" title="{{ e.path }} · {{ why }}">
         <a href="/?category={{ e.id }}">{{ e.label }}</a>
         {% if facet == "genre" and e.role != "primary" %}
@@ -40,7 +40,7 @@
   </div>
   {% endif %}{% endfor %}
   <form class="relative cat-add"
-        data-choices='{{ choices | map(attribute="display") | list | tojson }}'
+        data-choices='{{ ((choices | selectattr("total") | list) + (choices | rejectattr("total") | list)) | map(attribute="display") | list | tojson }}'
         x-data="{
           q: '', open: false,
           all: JSON.parse($el.dataset.choices || '[]'),

@@ -35,6 +35,7 @@ BOOKS = [
 def _seed(db_path: str) -> None:
     conn = db.connect(db_path)
     db.initialize(conn)
+    cat.add_category(conn, "Science Fiction > Space Opera")
     run = db.create_import_run(conn, source="goodreads", source_path="x.csv", mode="import", row_count=len(BOOKS))
     for gid, title, shelves in BOOKS:
         db.insert_book_from_goodreads(
@@ -84,13 +85,13 @@ class WebCategoryTests(unittest.TestCase):
     def test_review_lists_category_cards_and_counts_them_in_the_badge(self):
         body = self.client.get("/review").text
         self.assertIn('id="categories"', body)
-        self.assertIn("Genre: Speculative Fiction &gt; Horror", body)
+        self.assertIn("Genre: Horror &amp; Gothic", body)
         self.assertIn("2 books", body)  # shelf horror (It) + subject "Horror tales" (Legends)
         # sci-fi, space opera, cozy fantasy, stoicism, horror (shelf + subject = one card)
         self.assertIn('class="badge-destructive">5<', body)
 
     def test_accepting_a_card_applies_its_rules_and_updates_the_badge(self):
-        card = self.card("Genre: Speculative Fiction > Horror")
+        card = self.card("Genre: Horror & Gothic")
         response = self.client.post(f"/categories/suggestions/{card['id']}/accept")
         self.assertIn("now on 2 book(s)", response.text)
         self.assertIn('id="nav-more-badge" hx-swap-oob="true"', response.text)
@@ -103,7 +104,7 @@ class WebCategoryTests(unittest.TestCase):
         self.assertEqual([g["path"] for g in genres], ["Philosophy"])
 
     def test_rejecting_one_source_rerenders_the_rest_of_the_card(self):
-        card = self.card("Genre: Speculative Fiction > Horror")
+        card = self.card("Genre: Horror & Gothic")
         subject = next(m for m in card["members"] if m["match_kind"] == "subject")
         response = self.client.post(f"/categories/suggestions/{subject['id']}/reject", data={"only": "1"})
         self.assertIn('class="card catcard"', response.text)
@@ -117,8 +118,8 @@ class WebCategoryTests(unittest.TestCase):
         self.assertEqual(self.client.post(f"/categories/suggestions/{card['id']}/reject").status_code, 400)
 
     def test_primary_question_offers_its_genres(self):
-        self.accept("Genre: Speculative Fiction > Science Fiction")
-        self.accept("Genre: Speculative Fiction > Horror")
+        self.accept("Genre: Science Fiction")
+        self.accept("Genre: Horror & Gothic")
         cat.add_book_category(self.conn, self.book_id("5"), "genre:History")
         body = self.client.get("/review").text
         self.assertIn("Which one leads?", body)
@@ -129,16 +130,20 @@ class WebCategoryTests(unittest.TestCase):
     # --- Library --------------------------------------------------------------
 
     def test_sidebar_and_filters(self):
-        self.accept("Genre: Speculative Fiction > Science Fiction")
+        self.accept("Genre: Science Fiction")
         body = self.client.get("/").text
         self.assertIn("Genres", body)
         # Goodreads shelves feed genres and tags; they aren't a sidebar taxonomy.
         self.assertNotIn("Goodreads shelves", body)
-        speculative = self.category_id("Speculative Fiction")
+        speculative = self.category_id("Science Fiction")
         self.assertIn(f"/?category={speculative}", body)
         filtered = self.client.get(f"/?category={speculative}").text
         self.assertIn("Leviathan Wakes", filtered)
         self.assertNotIn("Meditations", filtered)
+        self.conn.execute("UPDATE books SET original_publication_year = 1869 WHERE goodreads_id = '1'")
+        self.conn.commit()
+        cat.categorize(self.conn)
+        self.assertIn("19th Century", self.client.get("/").text.split("Eras", 1)[1])
         shelf = self.client.get("/?gr_shelf=cozy-fantasy").text
         self.assertIn("Legends &amp; Lattes", shelf)
         self.assertNotIn("Leviathan Wakes", shelf)
@@ -153,7 +158,7 @@ class WebCategoryTests(unittest.TestCase):
     # --- Book block -----------------------------------------------------------
 
     def test_book_page_shows_categories_and_series_strip(self):
-        self.accept("Genre: Speculative Fiction > Science Fiction")
+        self.accept("Genre: Science Fiction")
         body = self.client.get("/book/1").text
         self.assertIn('id="detail-cats-1"', body)
         self.assertIn("Primary genre", body)
@@ -162,16 +167,16 @@ class WebCategoryTests(unittest.TestCase):
         self.assertIn('id="insp-cats-1"', self.client.get("/book/1/inspect").text)
 
     def test_book_edits_add_primary_remove(self):
-        response = self.client.post("/book/3/categories/add", data={"category": "Genre: Speculative Fiction > Fantasy", "scope": "insp"})
+        response = self.client.post("/book/3/categories/add", data={"category": "Genre: Fantasy", "scope": "insp"})
         self.assertIn('id="insp-cats-3"', response.text)
         self.assertIn(">Fantasy<", response.text)
         self.client.post("/book/3/categories/add", data={"category": "Horror"})
-        self.client.post("/book/3/categories/primary", data={"category": "genre:Speculative Fiction > Horror"})
+        self.client.post("/book/3/categories/primary", data={"category": "genre:Horror & Gothic"})
         detail = cat.book_categories(self.conn, self.book_id("3"))
-        self.assertEqual(detail["primary"]["path"], "Speculative Fiction > Horror")
-        self.client.post("/book/3/categories/remove", data={"category": "genre:Speculative Fiction > Horror"})
+        self.assertEqual(detail["primary"]["path"], "Horror & Gothic")
+        self.client.post("/book/3/categories/remove", data={"category": "genre:Horror & Gothic"})
         paths = [g["path"] for g in cat.book_categories(self.conn, self.book_id("3"))["by_facet"]["genre"]]
-        self.assertEqual(paths, ["Speculative Fiction > Fantasy"])
+        self.assertEqual(paths, ["Fantasy"])
 
     def test_book_edit_error_is_shown_inline(self):
         response = self.client.post("/book/3/categories/add", data={"category": "Nonexistent"})
@@ -182,17 +187,17 @@ class WebCategoryTests(unittest.TestCase):
     # --- Categories page -------------------------------------------------------
 
     def test_taxonomy_page_and_actions(self):
-        self.accept("Genre: Speculative Fiction > Science Fiction")
+        self.accept("Genre: Science Fiction")
         page = self.client.get("/taxonomy")
         self.assertEqual(page.status_code, 200)
         self.assertIn("Mapping rules", page.text)
         self.assertIn("Goodreads shelf “sci fi”", page.text)
 
         added = self.client.post(
-            "/taxonomy/add", data={"facet": "genre", "parent": "genre:Speculative Fiction > Fantasy", "name": "Grimdark"}
+            "/taxonomy/add", data={"facet": "genre", "parent": "genre:Fantasy", "name": "Grimdark"}
         )
         self.assertEqual(added.status_code, 200)  # followed the 303 back to the page
-        self.assertIn("Added Genre: Speculative Fiction &gt; Fantasy &gt; Grimdark", added.text)
+        self.assertIn("Added Genre: Fantasy &gt; Grimdark", added.text)
 
         grimdark = self.category_id("Grimdark")
         self.client.post(f"/taxonomy/{grimdark}/rename", data={"label": "Dark Fantasy"})
@@ -202,12 +207,12 @@ class WebCategoryTests(unittest.TestCase):
         self.assertIsNone(cat.Taxonomy(self.conn).get(grimdark).parent_id)
 
         space_opera = self.category_id("Space Opera")
-        merged = self.client.post(f"/taxonomy/{space_opera}/merge", data={"target": "genre:Speculative Fiction > Science Fiction"})
+        merged = self.client.post(f"/taxonomy/{space_opera}/merge", data={"target": "genre:Science Fiction"})
         self.assertIn("Merged", merged.text)
         deleted = self.client.post(f"/taxonomy/{grimdark}/delete")
         self.assertIn("Deleted", deleted.text)
 
-        mapped = self.client.post("/taxonomy/map", data={"kind": "shelf", "value": "cozy-fantasy", "to": "genre:Speculative Fiction > Fantasy"})
+        mapped = self.client.post("/taxonomy/map", data={"kind": "shelf", "value": "cozy-fantasy", "to": "genre:Fantasy"})
         self.assertIn("(1 book(s))", mapped.text)
         rule = next(r for r in cat.list_rules(self.conn) if r["match_value"] == "cozy fantasy")
         self.client.post(f"/taxonomy/rules/{rule['id']}/delete")
@@ -215,19 +220,19 @@ class WebCategoryTests(unittest.TestCase):
 
     def test_taxonomy_errors_come_back_as_a_message(self):
         response = self.client.post(
-            "/taxonomy/add", data={"facet": "genre", "parent": "genre:Speculative Fiction", "name": "Horror"}
+            "/taxonomy/add", data={"facet": "genre", "parent": "", "name": "Fantasy"}
         )
         self.assertIn('class="alert-destructive', response.text)
         self.assertIn("already exists", response.text)
         self.assertEqual(self.client.post("/taxonomy/99999/delete").status_code, 404)
 
     def test_alias_can_be_removed_on_the_categories_page(self):
-        horror = self.category_id("Horror")
+        horror = self.category_id("Horror & Gothic")
         page = self.client.get("/taxonomy").text
         self.assertIn(f'action="/taxonomy/{horror}/unalias"', page)
         response = self.client.post(f"/taxonomy/{horror}/unalias", data={"alias": "horror tales"})
-        self.assertIn("no longer matches Horror", response.text)
-        card = self.card("Genre: Speculative Fiction > Horror")
+        self.assertIn("no longer matches Horror &amp; Gothic", response.text)
+        card = self.card("Genre: Horror & Gothic")
         self.assertEqual([m["match_value"] for m in card["members"]], ["horror"])
 
     def test_import_page_explains_shelves(self):
@@ -251,10 +256,10 @@ class WebCategoryTests(unittest.TestCase):
     # --- API ------------------------------------------------------------------
 
     def test_api_filters_and_fields(self):
-        self.accept("Genre: Speculative Fiction > Science Fiction")
-        data = self.client.get("/api/books?category=Speculative Fiction").json()
+        self.accept("Genre: Science Fiction")
+        data = self.client.get("/api/books?category=Science Fiction").json()
         self.assertEqual(data["count"], 2)
-        self.assertEqual(data["books"][0]["primary_genre"], "Speculative Fiction > Science Fiction")
+        self.assertEqual(data["books"][0]["primary_genre"], "Science Fiction")
         self.assertEqual(data["books"][0]["series"]["name"], "The Expanse")
         self.assertEqual(self.client.get("/api/books?category=Nope").status_code, 422)
         self.assertEqual(self.client.get("/api/books/1").json()["series"]["position"], 1.0)

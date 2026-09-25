@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -19,7 +20,7 @@ HEADERS = ["Book Id", "Title", "Author", "Bookshelves", "Exclusive Shelf", "My R
 
 
 def row(gid, title, shelf, *, rating=0, author=None, pages="", avg="", read=""):
-    return {"Book Id": gid, "Title": title, "Author": author or f"Author {gid}", "Bookshelves": shelf, "Exclusive Shelf": shelf,
+    return {"Book Id": gid, "Title": title, "Author": author or f"Author {gid}", "Bookshelves": shelf, "Exclusive Shelf": shelf.split(",")[0],
             "My Rating": str(rating), "Date Added": "2024/01/01", "Date Read": read,
             "Number of Pages": pages, "Average Rating": avg}
 
@@ -39,6 +40,8 @@ class RecommendTestCase(unittest.TestCase):
             writer.writeheader()
             writer.writerows(self.rows)
         import_goodreads_csv(self.conn, path, mode="import")
+        for child in ("Science Fiction > Space Opera", "Science Fiction > Cyberpunk", "Fantasy > Epic Fantasy"):
+            cat.add_category(self.conn, child)
         cat.categorize(self.conn)
         for gid, refs in self.genres.items():
             for ref in refs:
@@ -84,12 +87,12 @@ class TasteTests(RecommendTestCase):
         top = rec.next_reads(self.conn, limit=1)[0]
         self.assertIn("You rate Space Opera 4.7★ (3 read)", top["reasons"])
         self.assertIn("You own it (ebook)", top["reasons"])
-        self.assertFalse(any("Speculative Fiction" in r for r in top["reasons"]))  # ancestors not repeated
+        self.assertFalse(any("Science Fiction" in r for r in top["reasons"]))  # ancestors not repeated
 
     def test_filters(self):
         self.assertEqual(self.ranked(owned_only=True), ["13"])
         self.assertEqual(self.ranked(max_pages=300), ["10"])
-        self.assertEqual(sorted(self.ranked(category="Speculative Fiction")), ["10", "12", "13"])
+        self.assertEqual(sorted(self.ranked(category="Science Fiction")), ["10", "13"])
         with self.assertRaises(cat.CategoryError):
             rec.next_reads(self.conn, category="Nope")
 
@@ -100,8 +103,9 @@ class TasteTests(RecommendTestCase):
         data = rec.insights(self.conn)
         self.assertEqual((data["read"], data["dnf"], data["to_read"]), (5, 2, 4))
         rows = {r["genre"]: r for r in data["genres"]}
-        self.assertEqual(rows["Speculative Fiction"]["dnf_rate"], 0.4)
-        self.assertEqual(rows["Romance"]["avg_rating"], 1.5)
+        self.assertEqual(rows["Science Fiction"]["avg_rating"], 4.67)
+        self.assertEqual(rows["Horror & Gothic"]["dnf_rate"], 1.0)
+        self.assertEqual(rows["Love Stories"]["avg_rating"], 1.5)
 
 
 class SeriesTests(RecommendTestCase):
@@ -162,11 +166,69 @@ class VarietyAndPathsTests(RecommendTestCase):
     def test_paths_suggest_unread_neighbours_of_loved_genres(self):
         paths = rec.explore_paths(self.conn)
         genres = [p["genre"] for p in paths]
-        self.assertIn("Speculative Fiction > Science Fiction > Cyberpunk", genres)
-        self.assertNotIn("Speculative Fiction > Fantasy > Epic Fantasy", genres)  # not a neighbour
+        self.assertIn("Science Fiction > Cyberpunk", genres)
+        self.assertNotIn("Fantasy > Epic Fantasy", genres)  # not a neighbour
         cyber = next(p for p in paths if p["genre"].endswith("Cyberpunk"))
         self.assertEqual([b["goodreads_id"] for b in cyber["books"]], ["20"])
         self.assertIn("Space Opera", cyber["because"])
+
+
+class ShelvesAndTraditionTests(RecommendTestCase):
+    rows = [
+        row("1", "Anna Karenina", "read", rating=5), row("2", "Fathers and Sons", "read", rating=5),
+        row("3", "Oblomov", "read,attempted", rating=2),
+        row("10", "The Master and Margarita", "to-read"), row("11", "Plain Pile", "to-read"),
+        row("12", "Shortlisted", "to-read,shortlist"),
+    ]
+    genres = {gid: ["tradition:Russian"] for gid in ("1", "2", "3", "10")}
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.conn.execute(
+            "UPDATE books SET subjects_json = ? WHERE goodreads_id IN ('1', '2', '10')",
+            (json.dumps(["New York Times reviewed"]),),
+        )
+        self.conn.commit()
+
+    def test_attempted_counts_as_did_not_finish(self):
+        data = rec.insights(self.conn)
+        self.assertEqual((data["read"], data["dnf"]), (2, 1))
+
+    def test_tradition_reasons_read_naturally(self):
+        picks = rec.next_reads(self.conn, variety=False)
+        top = next(p for p in picks if p["goodreads_id"] == "10")
+        self.assertLess(picks.index(top), [p["goodreads_id"] for p in picks].index("11"))
+        self.assertTrue(any(r.startswith("You rate Russian books") for r in top["reasons"]), top["reasons"])
+        self.assertFalse(any("New York Times" in r for r in top["reasons"]))
+
+    def test_shortlist_nudges_a_book_up(self):
+        picks = {p["goodreads_id"]: p for p in rec.next_reads(self.conn)}
+        self.assertIn("On your shortlist", picks["12"]["reasons"])
+        self.assertGreater(picks["12"]["score"], picks["11"]["score"])
+
+
+class FlatGenrePathsTests(RecommendTestCase):
+    rows = [
+        *[row(str(i), f"Loved {i}", "read", rating=5) for i in range(1, 4)],
+        row("10", "Pile Ideas", "to-read"), row("11", "Pile Horror", "to-read"),
+    ]
+    genres = {
+        **{str(i): ["Psychological Fiction", "Novel of Ideas"] for i in (1, 2)},
+        "3": ["Psychological Fiction"],
+        "10": ["Novel of Ideas"],
+        "11": ["Horror"],
+    }
+
+    def test_top_level_neighbours_come_from_shared_books(self):
+        # Novel of Ideas shares books with a loved genre; Horror shares none.
+        self.conn.execute(
+            "DELETE FROM book_categories WHERE category_id = (SELECT id FROM categories WHERE label = 'Novel of Ideas') "
+            "AND book_id = (SELECT id FROM books WHERE goodreads_id = '2')"
+        )
+        self.conn.commit()
+        genres = [p["genre"] for p in rec.explore_paths(self.conn)]
+        self.assertIn("Novel of Ideas", genres)
+        self.assertNotIn("Horror & Gothic", genres)
 
 
 class SurfaceTests(TasteTests):

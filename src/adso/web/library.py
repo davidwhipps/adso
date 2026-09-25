@@ -181,6 +181,8 @@ class Library:
     smart: list[Facet]
     tags: list[Facet]
     genres: list[Facet] = field(default_factory=list)
+    traditions: list[Facet] = field(default_factory=list)
+    eras: list[Facet] = field(default_factory=list)
     themes: list[Facet] = field(default_factory=list)
     category_label: str = ""
     chips: list[tuple[str, str]] = field(default_factory=list)  # (label, remove-url)
@@ -347,6 +349,8 @@ def build_library(conn: sqlite3.Connection, p: LibraryParams, cover_root: Path) 
         smart=smart,
         tags=tags,
         genres=category_facets("genre"),
+        traditions=category_facets("tradition"),
+        eras=category_facets("era"),
         themes=category_facets("theme"),
         category_label=category_label.split(" > ")[-1] if category_label else "",
         chips=chips,

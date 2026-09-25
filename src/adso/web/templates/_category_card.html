@@ -31,7 +31,9 @@
     <form class="flex items-center gap-2" hx-post="/categories/suggestions/{{ sid }}/accept" hx-target="{{ target }}" hx-swap="outerHTML">
       <select name="as_category" class="select text-sm" aria-label="Map to another category">
         <option value="">Map to another category…</option>
-        {% for c in choices %}<option value="{{ c.ref }}">{{ c.display }}</option>{% endfor %}
+        {% set used = choices | selectattr("total") | list %}
+        {% if used %}<optgroup label="In your library">{% for c in used %}<option value="{{ c.ref }}">{{ c.display }}</option>{% endfor %}</optgroup>{% endif %}
+        <optgroup label="{{ 'Other categories' if used else 'Categories' }}">{% for c in choices | rejectattr("total") %}<option value="{{ c.ref }}">{{ c.display }}</option>{% endfor %}</optgroup>
       </select>
       <button class="btn-sm-outline" type="submit">Accept as</button>
     </form>

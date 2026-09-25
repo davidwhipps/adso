@@ -155,8 +155,10 @@ Covers resolve from the book's own public Goodreads page first, so you get the s
 
 Goodreads exports carry no genres, only your own shelves. Adso builds a proper category system from what it does have, and you approve every step.
 
-- **Facets:** form (fiction, nonfiction, poetry…), genre, audience and theme. Genre is a tree, so filtering by *Speculative Fiction* includes *Science Fiction > Space Opera*. Each book has at most one **primary genre** plus any number of secondary categories.
-- **A starter taxonomy** is seeded once. After that it's yours: rename, move, merge, delete and add aliases with `adso taxonomy`.
+- **Facets:** form (fiction, nonfiction, short stories, essays, diaries & letters…), genre, tradition (American, British & Irish, Continental European, Russian, Latin American, Japanese & East Asian, Translated), era, audience and theme (family, love & marriage, war > World War II…). Genre is a tree, so filtering by *Science Fiction* includes any subgenres you add under it. Each book has at most one **primary genre** plus any number of secondary categories.
+- **A starter taxonomy** is seeded once. After that it's yours: rename, move, merge, delete and add aliases with `adso taxonomy`. Fiction genres describe the kind of book (Psychological Fiction, Novel of Ideas, Family Saga, Social Novel, Autofiction, Crime & Mystery, Science Fiction…) and there's no catch-all "Literary Fiction" or "Classics": a novel that fits none has no primary genre, and its tradition and era still describe it. Subgenres are yours to add when enough books need them.
+- **Era is automatic.** It comes from each book's original publication year (Ancient & Medieval, Early Modern, 19th Century, Modernist, Postwar, Contemporary), with no review needed. Set one by hand and yours wins.
+- **Noise is ignored.** Open Library subjects that describe a list or an edition rather than the book ("New York Times reviewed", reading levels, syllabus projects) never become suggestions or reasons.
 - **Suggestions, never silent changes.** `adso categorize` (also run after every sync) turns your custom Goodreads shelves, Open Library subjects and tags into proposals such as *shelf `cozy-fantasy` (14 books) → Genre: Fantasy > Cozy Fantasy*. Accepting one creates a rule that applies to every matching book now and to new books on each later sync, so you decide once per shelf, not once per book. Proposals that point at the same category arrive as one card: your `horror` shelf and Open Library's "Horror tales" and "Fiction, horror" are one decision (add `--only` to act on a single source). Rejected proposals never come back.
 - **Shelves fold into genres and tags.** A shelf that isn't a genre (`comfort-reads`, `japan-trip`) is proposed as a tag of the same name; accepted, it tags those books — and new ones on that shelf after each sync — once, so a tag you later remove stays removed. Goodreads shelves aren't another taxonomy to browse.
 - **Novels stay novels.** Open Library files plenty of fiction under "History" or "Biography"; a nonfiction genre that only a subject puts on a book you've classed as fiction becomes one grouped question instead of an assignment. Over-broad matches can be removed with `adso taxonomy unalias` (or the × next to an alias on the Categories page).
@@ -172,11 +174,11 @@ adso review 54 --only --reject           # just one source on a card
 adso taxonomy list --used                # the tree with book counts
 adso taxonomy add "theme:Found family"   # or "Fantasy > Grimdark"
 adso taxonomy map --shelf favorites --to "tag:keepers"     # or a category, e.g. "Fantasy"
-adso taxonomy unalias "Military History" war
+adso taxonomy unalias "Grief & Loss" loss
 adso taxonomy rules                      # and `adso taxonomy unmap RULE_ID`
 adso taxonomy merge "Space Opera" "Science Fiction" --yes
 adso edit GOODREADS_ID --genre "Historical Fiction" --add-category "theme:Monasteries"
-adso list --category "Speculative Fiction" --status "To Read"
+adso list --category "tradition:Russian" --status "To Read"
 adso list --series "The Expanse"         # in reading order
 adso list --gr-shelf cozy-fantasy        # any Goodreads shelf, not just the exclusive one
 ```
@@ -185,10 +187,11 @@ adso list --gr-shelf cozy-fantasy        # any Goodreads shelf, not just the exc
 
 Adso ranks your to-read shelf against your own taste and tells you why each book is there.
 
-- **Your taste** comes from what you've finished and how you rated it: genres, themes, tags, Open Library subjects and authors. 5★ counts strongly for, 1★ strongly against, a book you read but didn't rate mildly for, and a did-not-finish against. A genre needs a few books behind it before it counts fully, and specific genres ("Space Opera") weigh more than broad ones ("Fiction").
+- **Your taste** comes from what you've finished and how you rated it: genres, traditions, eras, themes, tags, Open Library subjects and authors. 5★ counts strongly for, 1★ strongly against, a book you read but didn't rate mildly for, and a did-not-finish against (custom shelves such as `attempted` or `abandoned` count as did-not-finish). A genre needs a few books behind it before it counts fully, and specific categories weigh more than broad ones ("Fiction").
+- **Your shortlist:** books on a `shortlist` (or `up-next`) shelf or tag get a small push up the list.
 - **Series order:** the next unread book in a series you're enjoying moves up; a book whose earlier volume you haven't read waits.
 - **Also:** authors you rate highly, books you own, and strong Goodreads ratings get a nudge, and a variety pass keeps the list from being ten books of one genre.
-- **New directions:** genres next to ones you love that you've barely read, with books already on your shelf.
+- **New directions:** genres next to ones you love (subgenres, and genres that often share books with them) that you've barely read, with books already on your shelf.
 - **Insights:** reading by genre (read, average rating, DNF rate, to-read), with notes when your pile leans toward what you rate lower.
 
 ```bash
