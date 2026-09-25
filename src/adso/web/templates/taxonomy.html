@@ -140,7 +140,7 @@
     </label>
     <label class="grid gap-1 text-sm">put it in
       <select name="to" class="select" required>
-        {% for c in choices %}<option value="{{ c.ref }}">{{ c.display }}</option>{% endfor %}
+        {% for c in choices if c.facet != "era" %}<option value="{{ c.ref }}">{{ c.display }}</option>{% endfor %}
       </select>
     </label>
     <button class="btn-sm h-9" type="submit">Add rule</button>

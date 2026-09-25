@@ -741,6 +741,20 @@ class EraAndNoiseTests(CategorizeTestCase):
         cat.categorize(self.conn)
         self.assertEqual(self.paths("2", "era"), [])
 
+    def test_nothing_maps_to_an_era(self):
+        self.conn.execute(
+            "UPDATE books SET subjects_json = ? WHERE goodreads_id = '2'", (json.dumps(["19th century"]),)
+        )
+        self.conn.commit()
+        cat.categorize(self.conn)
+        values = [item["match_value"] for item in cat.list_suggestions(self.conn)]
+        self.assertNotIn("19th century", values)
+        with self.assertRaises(cat.CategoryError):
+            cat.add_rule(self.conn, "shelf", "attempted", "era:Modernist")
+        card = self.proposal("subject", "russian literature")
+        with self.assertRaises(cat.CategoryError):
+            cat.accept_suggestion(self.conn, card["id"], as_category="era:Modernist")
+
     def test_noise_subjects_and_dnf_shelves_raise_nothing(self):
         values = [item["match_value"] for item in cat.list_suggestions(self.conn)]
         for noise in ("new york times reviewed", "open syllabus project", "general", "attempted"):

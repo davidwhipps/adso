@@ -197,10 +197,10 @@ SEED: dict[str, tuple[_Node, ...]] = {
     ),
     # Filled in from each book's original publication year (see ERA_YEARS).
     "era": (
-        ("Ancient & Medieval", ("ancient", "medieval"), ()),
+        ("Ancient & Medieval", (), ()),
         ("Early Modern", (), ()),
-        ("19th Century", ("nineteenth century",), ()),
-        ("Modernist", ("modernism",), ()),
+        ("19th Century", (), ()),
+        ("Modernist", (), ()),
         ("Postwar", (), ()),
         ("Contemporary", (), ()),
     ),

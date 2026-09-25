@@ -38,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Custom did-not-finish shelves (`attempted`, `abandoned`, `gave-up`) count as
   DNF and are never proposed as tags. A `shortlist` shelf or tag nudges a
   book up in Next up.
+- Nothing maps to an era: Era is left out of "Accept as" and mapping-rule
+  pickers, subjects such as "19th century" aren't proposed as eras, and a rule
+  or "accept as" pointing at an era is refused. You can still set one book's
+  era by hand.
 - Pick lists show categories in use first. The library sidebar gains
   Traditions and Eras, and Next up can filter by them.
 - New directions finds neighbours of top-level genres through the books they
