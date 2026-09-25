@@ -22,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .. import activity as activity_service
+from .. import categorize as categorize_service
 from .. import conflicts as conflicts_service
 from .. import covers as covers_service
 from .. import db
@@ -794,6 +795,8 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
                     }
                 except metadata_service.MetadataError:
                     context["metadata"] = None
+                # Apply the user's accepted category rules to new books (local only).
+                categorize_service.categorize(conn)
             except Exception as exc:  # noqa: BLE001 - surface any parse/IO error to the user
                 context["error"] = f"Could not import that file: {exc}"
             finally:

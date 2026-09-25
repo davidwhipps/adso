@@ -130,13 +130,12 @@ Each book goes through a pipeline of pluggable "suggesters". Each suggester retu
 
 ## Delivery phases (separate PRs)
 
-1. **Foundation**:
-   - The migration and seed taxonomy.
-   - Moving tags into the `theme` facet.
-   - A `categorize.py` with the Rule, ShelfDiscovery, Subject and Series suggesters.
-   - The CLI (`categorize`, `review`, `taxonomy`, `edit --genre`) and filters.
-   - Custom shelves exposed as a filter and facet.
-   - Tests.
+1. **Foundation** (done): tables, seed taxonomy, `categorize.py` (rules, shelf/subject/tag proposals, series from titles, provisional primary genres), CLI (`categorize`, `review`, `taxonomy`, `edit --genre/--add-category/--remove-category/--series`), `--category`/`--gr-shelf`/`--series` filters, and categorisation after CLI and web syncs. Where it departs from the design above:
+   - Tags stay in `tags_json` rather than moving into the theme facet. They feed proposals like shelves do, and the move to the theme facet is left for phase 2, alongside the web and MCP surfaces that read tags.
+   - Setting and era (`subject_places`, `subject_times`) are not mapped yet. The facets are form, genre, audience and theme.
+   - `book_relations` is left for phase 4. Series is in.
+   - Category labels are not in the FTS index yet.
+   - Review is list-then-decide (`adso review`, `adso review ID --accept/--as/--reject/--reopen`), matching `conflicts`/`resolve`, rather than an interactive walk.
 2. **Web and MCP**: the review page, book-page pills, genre tree sidebar, taxonomy page, MCP tools, and updated exports (CSV, JSON, Notion multi-select for Genre).
 3. **AI suggester**: the `[ai]` optional extra with the `anthropic` SDK, batching, prompt caching, cost dry-run, and proposed-category approval.
 4. **Relationships and next reads**: `related_books`, the taste profile, `adso next`, the web panel, and insight views.

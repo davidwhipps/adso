@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import db
+from .categorize import Taxonomy
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,14 @@ class BookFilters:
     shelf: str | None = None
     exclude_shelf: str | None = None
     rating: int | None = None
+    # A category reference ("Fantasy", "theme:cozy", "Fantasy > Cozy Fantasy");
+    # matches books in that category or anything beneath it.
+    category: str | None = None
+    # A custom Goodreads shelf (any shelf in Bookshelves, not just the
+    # exclusive one), e.g. "cozy-fantasy".
+    gr_shelf: str | None = None
+    # Series name; results come back in reading order.
+    series: str | None = None
     limit: int | None = None
     # "added" sorts newest-first by date_added; anything else falls back to the
     # default title ordering.
@@ -34,9 +43,26 @@ class BookFilters:
 SEARCH_FIELDS = db.SEARCH_FIELDS
 
 
-def list_books(conn: sqlite3.Connection, filters: BookFilters | None = None) -> list[dict[str, Any]]:
+@dataclass(frozen=True)
+class _ResolvedFilters:
+    filters: BookFilters
+    category_ids: tuple[int, ...] | None = None
+
+
+def _resolve(conn: sqlite3.Connection, filters: BookFilters | None) -> _ResolvedFilters:
+    """Turn a category reference into the ids it rolls up (raises CategoryError)."""
     filters = filters or BookFilters()
-    where, params = _filter_sql(filters)
+    if not filters.category:
+        return _ResolvedFilters(filters)
+    taxonomy = Taxonomy(conn)
+    category = taxonomy.resolve(filters.category)
+    return _ResolvedFilters(filters, tuple(taxonomy.descendants(category.id)))
+
+
+def list_books(conn: sqlite3.Connection, filters: BookFilters | None = None) -> list[dict[str, Any]]:
+    resolved = _resolve(conn, filters)
+    filters = resolved.filters
+    where, params = _filter_sql(filters, category_ids=resolved.category_ids)
     limit_sql = _limit_sql(filters)
     rows = conn.execute(
         f"""
@@ -59,11 +85,12 @@ def search_books(
     if not query:
         return list_books(conn, filters)
 
-    filters = filters or BookFilters()
+    resolved = _resolve(conn, filters)
+    filters = resolved.filters
     if _fts_index_available(conn):
-        return _search_books_fts(conn, query, filters)
+        return _search_books_fts(conn, query, resolved)
 
-    where, params = _filter_sql(filters)
+    where, params = _filter_sql(filters, category_ids=resolved.category_ids)
     search_where, search_params = _search_sql(query)
     if where:
         combined_where = f"{where} AND {search_where}"
@@ -115,13 +142,14 @@ def get_book(conn: sqlite3.Connection, goodreads_id: str) -> dict[str, Any] | No
 def _search_books_fts(
     conn: sqlite3.Connection,
     query: str,
-    filters: BookFilters,
+    resolved: _ResolvedFilters,
 ) -> list[dict[str, Any]]:
+    filters = resolved.filters
     fts_query = _fts_query(query)
     if not fts_query:
         return list_books(conn, filters)
 
-    where, params = _filter_sql(filters, table_prefix="books")
+    where, params = _filter_sql(filters, table_prefix="books", category_ids=resolved.category_ids)
     if where:
         combined_where = f"{where} AND books_fts MATCH ?"
     else:
@@ -129,7 +157,7 @@ def _search_books_fts(
     limit_sql = _limit_sql(filters)
 
     # An explicit sort beats relevance ordering; otherwise rank by bm25.
-    if filters.sort == "added":
+    if filters.sort == "added" or filters.series:
         order_sql = _order_sql(filters, table_prefix="books")
     else:
         order_sql = "bm25(books_fts), books.title COLLATE NOCASE, books.author COLLATE NOCASE"
@@ -184,12 +212,20 @@ def _order_sql(filters: BookFilters, table_prefix: str | None = None) -> str:
     """
     prefix = f"{table_prefix}." if table_prefix else ""
     title_order = f"{prefix}title COLLATE NOCASE, {prefix}author COLLATE NOCASE"
+    if filters.series:
+        position = f"(SELECT position FROM book_series WHERE book_id = {prefix or 'books.'}id)"
+        return f"{position} IS NULL, {position}, {title_order}"
     if filters.sort == "added":
         return f"{prefix}date_added IS NULL, {prefix}date_added DESC, {title_order}"
     return title_order
 
 
-def _filter_sql(filters: BookFilters, table_prefix: str | None = None) -> tuple[str, list[Any]]:
+def _filter_sql(
+    filters: BookFilters,
+    table_prefix: str | None = None,
+    *,
+    category_ids: tuple[int, ...] | None = None,
+) -> tuple[str, list[Any]]:
     clauses: list[str] = []
     params: list[Any] = []
     prefix = f"{table_prefix}." if table_prefix else ""
@@ -221,6 +257,22 @@ def _filter_sql(filters: BookFilters, table_prefix: str | None = None) -> tuple[
             f"({prefix}exclusive_shelf IS NULL OR {prefix}exclusive_shelf != ? COLLATE NOCASE)"
         )
         params.append(filters.exclude_shelf.strip())
+    if category_ids is not None:
+        placeholders = ", ".join("?" for _ in category_ids)
+        clauses.append(
+            f"{prefix}id IN (SELECT book_id FROM book_categories WHERE category_id IN ({placeholders}))"
+        )
+        params.extend(category_ids)
+    if filters.gr_shelf:
+        # shelves_json holds lowercased shelf names, as tags_json does tags.
+        clauses.append(f"{prefix}shelves_json LIKE ?")
+        params.append(f'%"{filters.gr_shelf.lower().strip()}"%')
+    if filters.series:
+        clauses.append(
+            f"{prefix}id IN (SELECT bs.book_id FROM book_series bs JOIN series s ON s.id = bs.series_id "
+            "WHERE s.name = ? COLLATE NOCASE)"
+        )
+        params.append(" ".join(filters.series.split()))
     if filters.rating is not None:
         if filters.rating == 0:
             # Goodreads exports unrated as 0, but an empty "My Rating" cell

@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Categories, reviewed suggestions and series** (`adso categorize`, `adso review`,
+  `adso taxonomy`). Books are organised along facets (form, genre, audience,
+  theme). Genre is a hierarchy with one primary genre per book. A starter
+  taxonomy is seeded once and is then the user's to rename, move, merge and alias.
+  Custom Goodreads shelves, Open Library subjects and tags become mapping
+  proposals. Accepting one creates a rule that applies across the library and to
+  books arriving in later syncs. Rejections are remembered, hand edits are never
+  overridden, and categories removed from a book stay removed. Primary genres are
+  set when unambiguous and raised for review when not. Series and reading order
+  are parsed from Goodreads titles. `adso list`/`search` gain `--category`
+  (includes subcategories), `--gr-shelf` (any Goodreads shelf) and `--series`
+  (reading order). `adso edit` gains `--genre`, `--add-category`,
+  `--remove-category`, `--series` and `--series-position`. `adso show` prints
+  categories and series. Categorisation runs, local only, after every CLI and
+  web sync.
 - **Redesigned library web UI.** One library page replaces the Catalogue and To Read
   pages. A sidebar lists the whole library, shelves, smart views
   (Loaned out, Read but unrated, Recently added, Five stars, Untagged) and tags, each

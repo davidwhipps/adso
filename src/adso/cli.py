@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from . import __version__, branding, db
+from . import categorize as categorize_service
 from . import config as config_module
 from . import conflicts as conflicts_service
 from . import dedupe as dedupe_service
@@ -132,6 +133,8 @@ def _dispatch(args, parser) -> int:
             if book is None:
                 parser.error(f"No book found for Goodreads ID {args.goodreads_id}")
             print(_format_book_detail(book))
+            print("")
+            print(_format_book_categories(categorize_service.book_categories(conn, int(book["id"]))))
             return 0
 
         # `import` and `sync` run the same safe, idempotent operation; the command
@@ -174,19 +177,36 @@ def _dispatch(args, parser) -> int:
 
         if args.command == "edit":
             updates = _local_updates_from_args(args)
-            if not updates:
+            category_edits = _has_category_edits(args)
+            if not updates and not category_edits:
                 parser.error("No local fields provided to update.")
-            if get_book(conn, args.goodreads_id) is None:
+            book = get_book(conn, args.goodreads_id)
+            if book is None:
                 raise AdsoError(
                     f"No book found for Goodreads ID {args.goodreads_id}",
                     hint="Run `adso search <title>` or `adso list` to find the ID.",
                 )
-            try:
-                db.update_local_fields(conn, args.goodreads_id, updates)
-            except ValueError as exc:
-                raise AdsoError(str(exc)) from exc
-            print(f"Updated local catalogue fields for Goodreads ID {args.goodreads_id}")
+            if updates:
+                try:
+                    db.update_local_fields(conn, args.goodreads_id, updates)
+                except ValueError as exc:
+                    raise AdsoError(str(exc)) from exc
+                print(f"Updated local catalogue fields for Goodreads ID {args.goodreads_id}")
+            if category_edits:
+                for line in _apply_category_edits(conn, int(book["id"]), args):
+                    print(line)
             return 0
+
+        if args.command == "categorize":
+            result = categorize_service.categorize(conn, dry_run=args.dry_run)
+            print(_format_categorize_result(result, dry_run=args.dry_run))
+            return 0
+
+        if args.command == "review":
+            return _run_review(conn, args)
+
+        if args.command == "taxonomy":
+            return _run_taxonomy(conn, args)
 
         if args.command == "conflicts":
             groups = conflicts_service.list_open_conflicts(conn)
@@ -285,6 +305,7 @@ def _sync_goodreads(conn, cfg: ResolvedConfig, csv_path, *, mode: str, args):
         _auto_fetch_covers(conn, cfg.db_path)
     if not args.no_metadata:
         _auto_fetch_metadata(conn)
+    _auto_categorize(conn)
     return summary
 
 
@@ -523,6 +544,17 @@ class _BrandedParser(argparse.ArgumentParser):
         return branding.render_help(self.prog) + "\n"
 
 
+def _add_category_filter_args(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument(
+        "--category",
+        help="Filter by category, including everything beneath it, e.g. 'Fantasy' or 'theme:cozy'",
+    )
+    sub.add_argument(
+        "--gr-shelf", help="Filter by any Goodreads shelf (not just the exclusive one), e.g. 'cozy-fantasy'"
+    )
+    sub.add_argument("--series", help="Filter by series name; lists books in reading order")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = _BrandedParser(prog="adso", description="Adso local-first book catalogue")
     parser.add_argument(
@@ -644,6 +676,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Filter by your star rating (0 = unrated)",
     )
     list_parser.add_argument("--limit", type=int, help="Maximum number of books to show")
+    _add_category_filter_args(list_parser)
 
     search_parser = subparsers.add_parser("search", help="Search books in the local catalogue")
     search_parser.add_argument("query", help="Search query")
@@ -661,6 +694,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Filter by your star rating (0 = unrated)",
     )
     search_parser.add_argument("--limit", type=int, help="Maximum number of books to show")
+    _add_category_filter_args(search_parser)
 
     show_parser = subparsers.add_parser("show", help="Show detailed information for one book")
     show_parser.add_argument("goodreads_id", help="Goodreads Book ID")
@@ -751,6 +785,103 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     edit_parser.add_argument("--loaned-to", help="Who currently has the book")
     edit_parser.add_argument("--local-notes", help="Local catalogue notes")
+    edit_parser.add_argument(
+        "--genre", metavar="CATEGORY", help="Set the primary genre, e.g. 'Fantasy > Cozy Fantasy'"
+    )
+    edit_parser.add_argument(
+        "--add-category",
+        action="append",
+        metavar="CATEGORY",
+        help="Add a category (repeatable), e.g. 'Literary Fiction' or 'theme:grief'",
+    )
+    edit_parser.add_argument(
+        "--remove-category",
+        action="append",
+        metavar="CATEGORY",
+        help="Remove a category (repeatable); rules won't add it back to this book",
+    )
+    edit_parser.add_argument(
+        "--series", help="Set the series by hand ('none' marks the book as not in a series)"
+    )
+    edit_parser.add_argument(
+        "--series-position", type=float, metavar="N", help="Position in the series, e.g. 2 or 1.5"
+    )
+
+    categorize_parser = subparsers.add_parser(
+        "categorize",
+        help="Apply your category rules and raise new suggestions for review",
+        description=(
+            "Apply accepted category rules across the library, read series from "
+            "Goodreads titles, and turn unmapped Goodreads shelves, Open Library "
+            "subjects and tags into suggestions for `adso review`. Runs "
+            "automatically after every sync; never uses the network."
+        ),
+    )
+    categorize_parser.add_argument(
+        "--dry-run", action="store_true", help="Report what would change without writing"
+    )
+
+    review_parser = subparsers.add_parser(
+        "review",
+        help="Review categorisation suggestions",
+        description=(
+            "With no ID, list open suggestions (highest-leverage first). With an "
+            "ID, decide it. Accepting a shelf/subject/tag mapping creates a rule "
+            "that also applies to future books."
+        ),
+    )
+    review_parser.add_argument("suggestion_id", type=int, nargs="?", help="Suggestion ID to decide")
+    review_action = review_parser.add_mutually_exclusive_group()
+    review_action.add_argument("--accept", action="store_true", help="Accept the suggestion")
+    review_action.add_argument("--reject", action="store_true", help="Reject it; it won't be suggested again")
+    review_action.add_argument("--reopen", action="store_true", help="Return a rejected suggestion to the queue")
+    review_parser.add_argument(
+        "--as", dest="as_category", metavar="CATEGORY", help="Accept, but map to this category instead"
+    )
+    review_parser.add_argument(
+        "--all", action="store_true", help="Also list decided suggestions (accepted and rejected)"
+    )
+
+    taxonomy_parser = subparsers.add_parser(
+        "taxonomy", help="Manage categories, aliases and shelf/subject mapping rules"
+    )
+    taxonomy_sub = taxonomy_parser.add_subparsers(dest="taxonomy_command", required=True)
+    tax_list = taxonomy_sub.add_parser("list", help="Show the category tree with book counts")
+    tax_list.add_argument("--facet", help="Only this facet (form, genre, audience, theme)")
+    tax_list.add_argument("--used", action="store_true", help="Hide categories with no books")
+    tax_add = taxonomy_sub.add_parser(
+        "add", help="Add a category: 'theme:Found family' or 'Fantasy > Grimdark'"
+    )
+    tax_add.add_argument("category")
+    tax_rename = taxonomy_sub.add_parser("rename", help="Rename a category (old name kept as an alias)")
+    tax_rename.add_argument("category")
+    tax_rename.add_argument("new_label")
+    tax_move = taxonomy_sub.add_parser("move", help="Move a category under another parent")
+    tax_move.add_argument("category")
+    tax_move_where = tax_move.add_mutually_exclusive_group(required=True)
+    tax_move_where.add_argument("--under", metavar="PARENT", help="New parent category")
+    tax_move_where.add_argument("--top", action="store_true", help="Make it top-level")
+    tax_merge = taxonomy_sub.add_parser("merge", help="Fold one category into another")
+    tax_merge.add_argument("source")
+    tax_merge.add_argument("target")
+    tax_merge.add_argument("--yes", action="store_true", help="Confirm (otherwise just show the impact)")
+    tax_delete = taxonomy_sub.add_parser("delete", help="Delete a category (children move up)")
+    tax_delete.add_argument("category")
+    tax_delete.add_argument("--yes", action="store_true", help="Confirm (otherwise just show the impact)")
+    tax_alias = taxonomy_sub.add_parser("alias", help="Add an alternative name used for matching")
+    tax_alias.add_argument("category")
+    tax_alias.add_argument("alias")
+    taxonomy_sub.add_parser("rules", help="List shelf/subject/tag mapping rules")
+    tax_map = taxonomy_sub.add_parser("map", help="Map a shelf, subject or tag to a category")
+    tax_map_what = tax_map.add_mutually_exclusive_group(required=True)
+    tax_map_what.add_argument("--shelf", help="Goodreads shelf name")
+    tax_map_what.add_argument("--subject", help="Open Library subject")
+    tax_map_what.add_argument("--tag", help="Local tag")
+    tax_map.add_argument("--to", dest="to", required=True, metavar="CATEGORY", help="Target category")
+    tax_unmap = taxonomy_sub.add_parser(
+        "unmap", help="Delete a rule and the category assignments it made"
+    )
+    tax_unmap.add_argument("rule_id", type=int)
 
     conflicts_parser = subparsers.add_parser(
         "conflicts", help="List open sync conflicts with their IDs"
@@ -958,6 +1089,18 @@ def _auto_fetch_metadata(conn) -> None:
         print(line)
 
 
+def _auto_categorize(conn) -> None:
+    """Apply accepted category rules to new/changed books; purely local, no network."""
+    result = categorize_service.categorize(conn)
+    if result["assigned"] or result["removed"] or result["series"] or result["primaries_set"]:
+        print(
+            f"\nCategories: {result['assigned']} assigned and {result['removed']} removed by your rules, "
+            f"{result['primaries_set']} primary genres set, {result['series']} series updated."
+        )
+    if result["pending"]:
+        print(f"{result['pending']} categorisation suggestion(s) waiting — run `adso review`.")
+
+
 def _format_metadata_result(result: dict[str, object], *, dry_run: bool) -> str:
     heading = "Metadata dry-run complete" if dry_run else "Metadata fetch complete"
     lines = [
@@ -1047,8 +1190,264 @@ def _book_filters_from_args(args) -> BookFilters:
         author=getattr(args, "author", None),
         shelf=getattr(args, "shelf", None),
         rating=getattr(args, "rating", None),
+        category=getattr(args, "category", None),
+        gr_shelf=getattr(args, "gr_shelf", None),
+        series=getattr(args, "series", None),
         limit=getattr(args, "limit", None),
     )
+
+
+def _has_category_edits(args) -> bool:
+    return bool(
+        args.genre
+        or args.add_category
+        or args.remove_category
+        or args.series is not None
+        or args.series_position is not None
+    )
+
+
+def _apply_category_edits(conn, book_id: int, args) -> list[str]:
+    lines: list[str] = []
+    for reference in args.remove_category or []:
+        category = categorize_service.remove_book_category(conn, book_id, reference)
+        lines.append(f"Removed {reference!r} ({category.label})")
+    for reference in args.add_category or []:
+        category = categorize_service.add_book_category(conn, book_id, reference)
+        lines.append(f"Added {category.label}")
+    if args.genre:
+        category = categorize_service.set_primary_genre(conn, book_id, args.genre)
+        lines.append(f"Primary genre: {category.label}")
+    if args.series is not None or args.series_position is not None:
+        if args.series is None:
+            current = categorize_service.book_series(conn, book_id)
+            if current is None:
+                raise AdsoError("This book has no series yet", hint="Pass --series NAME as well.")
+            name = current["name"]
+        else:
+            name = None if args.series.strip().lower() in ("", "none") else args.series
+        categorize_service.set_book_series(conn, book_id, name, args.series_position)
+        if name:
+            position = categorize_service.format_position(args.series_position)
+            lines.append(f"Series: {name} {position}".rstrip())
+        else:
+            lines.append("Series: none")
+    return lines
+
+
+def _run_review(conn, args) -> int:
+    if args.suggestion_id is None:
+        if args.accept or args.reject or args.reopen or args.as_category:
+            raise AdsoError("Give a suggestion ID to decide", hint="Run `adso review` to list them.")
+        print(_format_suggestions(categorize_service.list_suggestions(conn)))
+        if args.all:
+            for status in ("accepted", "rejected"):
+                decided = categorize_service.list_suggestions(conn, status=status)
+                if decided:
+                    print("")
+                    print(_format_suggestions(decided, heading=f"{status.capitalize()} suggestions"))
+        return 0
+    if args.reject:
+        item = categorize_service.reject_suggestion(conn, args.suggestion_id)
+        print(f"Rejected [{item['id']}] {item['subject']} → {item['target']}")
+        return 0
+    if args.reopen:
+        item = categorize_service.reopen_suggestion(conn, args.suggestion_id)
+        print(f"Reopened [{item['id']}] {item['subject']} → {item['target']}")
+        return 0
+    if not (args.accept or args.as_category):
+        raise AdsoError(
+            "Say what to do with the suggestion",
+            hint=f"`adso review {args.suggestion_id} --accept`, `--as CATEGORY` or `--reject`.",
+        )
+    outcome = categorize_service.accept_suggestion(conn, args.suggestion_id, as_category=args.as_category)
+    if outcome["kind"] == "primary":
+        print(f"Primary genre set: {outcome['category']}")
+    else:
+        print(f"Mapped to {outcome['category']}: now applied to {outcome['books']} book(s).")
+        _print_run_followups(outcome["run"])
+    return 0
+
+
+def _run_taxonomy(conn, args) -> int:
+    command = args.taxonomy_command
+    if command == "list":
+        print(_format_taxonomy(categorize_service.taxonomy_tree(conn), facet=args.facet, used=args.used))
+        return 0
+    if command == "add":
+        category = categorize_service.add_category(conn, args.category)
+        print(f"Added {categorize_service.Taxonomy(conn).display(category.id)}")
+        return 0
+    if command == "rename":
+        category = categorize_service.rename_category(conn, args.category, args.new_label)
+        print(f"Renamed to {categorize_service.Taxonomy(conn).display(category.id)}")
+        return 0
+    if command == "move":
+        category = categorize_service.move_category(conn, args.category, None if args.top else args.under)
+        print(f"Moved to {categorize_service.Taxonomy(conn).display(category.id)}")
+        return 0
+    if command == "alias":
+        category = categorize_service.add_alias(conn, args.category, args.alias)
+        print(f"{args.alias!r} now also matches {category.label}")
+        return 0
+    if command in ("merge", "delete"):
+        taxonomy = categorize_service.Taxonomy(conn)
+        source = taxonomy.resolve(args.source if command == "merge" else args.category)
+        impact = categorize_service.category_impact(conn, source.id)
+        if command == "merge":
+            target = taxonomy.resolve(args.target, facet=source.facet)
+            what = f"Merge {taxonomy.display(source.id)} into {taxonomy.display(target.id)}"
+        else:
+            what = f"Delete {taxonomy.display(source.id)}"
+        summary = (
+            f"{what}: affects {impact['books']} book assignment(s), "
+            f"{impact['rules']} rule(s), {impact['children']} subcategor(y/ies)."
+        )
+        if not args.yes:
+            print(summary)
+            print("Nothing changed. Re-run with --yes to confirm.")
+            return 0
+        if command == "merge":
+            categorize_service.merge_categories(conn, args.source, args.target)
+            print(f"{summary}\nDone; the old name is kept as an alias.")
+        else:
+            categorize_service.delete_category(conn, args.category)
+            print(f"{summary}\nDone.")
+        return 0
+    if command == "rules":
+        print(_format_rules(categorize_service.list_rules(conn)))
+        return 0
+    if command == "map":
+        kind, value = next(
+            (kind, getattr(args, kind)) for kind in ("shelf", "subject", "tag") if getattr(args, kind)
+        )
+        outcome = categorize_service.add_rule(conn, kind, value, args.to)
+        print(
+            f"Rule [{outcome['rule_id']}]: {categorize_service.MATCH_KIND_LABELS[kind]} {value!r} → "
+            f"{outcome['category']} ({outcome['books']} book(s))."
+        )
+        _print_run_followups(outcome["run"])
+        return 0
+    if command == "unmap":
+        rule = categorize_service.delete_rule(conn, args.rule_id)
+        print(
+            f"Deleted rule [{rule['id']}] {rule['match_label']} {rule['match_value']!r} → {rule['category']}; "
+            f"removed it from {rule['books']} book(s)."
+        )
+        return 0
+    raise AdsoError(f"Unknown taxonomy command {command!r}")
+
+
+def _print_run_followups(run: dict[str, int]) -> None:
+    if run.get("primaries_set"):
+        print(f"{run['primaries_set']} book(s) got a primary genre.")
+    if run.get("pending"):
+        print(f"{run['pending']} suggestion(s) still open — `adso review`.")
+
+
+def _format_categorize_result(result: dict[str, int], *, dry_run: bool) -> str:
+    prefix = "Dry run — would have: " if dry_run else ""
+    lines = [
+        f"{prefix}Checked {result['books']} book(s): "
+        f"{result['assigned']} categories assigned and {result['removed']} removed by rules, "
+        f"{result['primaries_set']} primary genres set, {result['series']} series updated.",
+        f"{result['new_proposals']} new mapping proposal(s) and {result['primaries_suggested']} "
+        f"primary-genre question(s); {result['pending']} suggestion(s) open in total.",
+    ]
+    if result["pending"] and not dry_run:
+        lines.append("Next: `adso review`.")
+    return "\n".join(lines)
+
+
+def _format_suggestions(items: list[dict[str, object]], *, heading: str | None = None) -> str:
+    if not items:
+        return "No open suggestions. Run `adso categorize` after a sync or metadata fetch."
+    maps = [item for item in items if item["kind"] == "map"]
+    primaries = [item for item in items if item["kind"] == "primary"]
+    lines: list[str] = []
+    if heading:
+        lines += [heading, "-" * len(heading)]
+    if maps:
+        lines.append("Mappings — decide once, applies to every matching book now and after each sync")
+        for item in maps:
+            lines.append(
+                f"  [{item['id']}] {item['subject']} ({item['book_count']} book(s)) → {item['target']}"
+                f"  {int(float(item['confidence']) * 100)}%"
+            )
+            if item.get("evidence"):
+                lines.append(f"       {item['evidence']}")
+    if primaries:
+        if lines:
+            lines.append("")
+        lines.append("Primary genre — the book has several; which one leads?")
+        for item in primaries:
+            lines.append(f"  [{item['id']}] {item['subject']} → {item['target']}")
+            if item.get("evidence"):
+                lines.append(f"       {item['evidence']}")
+    if not heading:
+        lines.append("")
+        lines.append(
+            "Decide with `adso review ID --accept`, `adso review ID --as \"Genre > Path\"` "
+            "or `adso review ID --reject`."
+        )
+    return "\n".join(lines)
+
+
+def _format_taxonomy(facets: list[dict[str, object]], *, facet: str | None, used: bool) -> str:
+    lines: list[str] = []
+    for group in facets:
+        if facet and group["facet"] != facet.lower():
+            continue
+        nodes = [n for n in group["categories"] if not used or n["total"]]  # type: ignore[index]
+        if lines:
+            lines.append("")
+        lines.append(f"{group['label']} ({group['facet']})")
+        if not nodes:
+            lines.append("  (none yet)")
+        for node in nodes:
+            count = f" ({node['total']})" if node["total"] else ""
+            lines.append(f"{'  ' * (node['depth'] + 1)}{node['label']}{count}")
+    if not lines:
+        return f"No facet named {facet!r}. Facets: form, genre, audience, theme."
+    return "\n".join(lines)
+
+
+def _format_rules(rules: list[dict[str, object]]) -> str:
+    if not rules:
+        return "No mapping rules yet. Accept suggestions with `adso review`, or add one with `adso taxonomy map`."
+    lines = [
+        f"  [{rule['id']}] {rule['match_label']} {rule['match_value']!r} → {rule['category']} "
+        f"({rule['books']} book(s))"
+        for rule in rules
+    ]
+    lines.append("")
+    lines.append("Remove one with `adso taxonomy unmap RULE_ID`.")
+    return "\n".join(lines)
+
+
+_SOURCE_LABELS = {"user": "you", "rule": "rule", "suggestion": "suggestion"}
+
+
+def _format_book_categories(data: dict[str, object]) -> str:
+    lines = ["Categories", "----------"]
+    primary = data.get("primary")
+    lines.append(f"Primary Genre: {primary['path'] if primary else '-'}")  # type: ignore[index]
+    by_facet = data.get("by_facet") or {}
+    for facet, label in categorize_service.FACET_LABELS.items():
+        entries = by_facet.get(facet) or []  # type: ignore[union-attr]
+        if not entries:
+            continue
+        rendered = []
+        for entry in entries:
+            source = _SOURCE_LABELS.get(entry["source"], entry["source"])
+            why = f"{source}: {entry['evidence']}" if entry.get("evidence") else source
+            rendered.append(f"{entry['path']} [{why}]")
+        lines.append(f"{label}: " + "; ".join(rendered))
+    series = data.get("series")
+    if series:
+        position = categorize_service.format_position(series["position"])  # type: ignore[index]
+        lines.append(f"Series: {series['name']} {position}".rstrip())  # type: ignore[index]
+    return "\n".join(lines)
 
 
 def _format_notion_export_result(result: dict[str, object], *, dry_run: bool) -> str:
