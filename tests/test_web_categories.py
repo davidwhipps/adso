@@ -97,7 +97,7 @@ class WebCategoryTests(unittest.TestCase):
         self.assertEqual(len(cat.list_rules(self.conn)), 2)
 
     def test_accept_as_another_category(self):
-        card = self.card("new Theme: Stoicism")
+        card = self.card("Tag: #stoicism")
         self.client.post(f"/categories/suggestions/{card['id']}/accept", data={"as_category": "genre:Philosophy"})
         genres = cat.book_categories(self.conn, self.book_id("4"))["by_facet"]["genre"]
         self.assertEqual([g["path"] for g in genres], ["Philosophy"])
@@ -111,7 +111,7 @@ class WebCategoryTests(unittest.TestCase):
         self.assertNotIn("Horror tales", response.text)
 
     def test_rejecting_a_card(self):
-        card = self.card("new Theme: Stoicism")
+        card = self.card("Tag: #stoicism")
         response = self.client.post(f"/categories/suggestions/{card['id']}/reject")
         self.assertIn("be suggested for these again", response.text)
         self.assertEqual(self.client.post(f"/categories/suggestions/{card['id']}/reject").status_code, 400)
@@ -132,7 +132,8 @@ class WebCategoryTests(unittest.TestCase):
         self.accept("Genre: Speculative Fiction > Science Fiction")
         body = self.client.get("/").text
         self.assertIn("Genres", body)
-        self.assertIn("Goodreads shelves", body)
+        # Goodreads shelves feed genres and tags; they aren't a sidebar taxonomy.
+        self.assertNotIn("Goodreads shelves", body)
         speculative = self.category_id("Speculative Fiction")
         self.assertIn(f"/?category={speculative}", body)
         filtered = self.client.get(f"/?category={speculative}").text
@@ -219,6 +220,33 @@ class WebCategoryTests(unittest.TestCase):
         self.assertIn('class="alert-destructive', response.text)
         self.assertIn("already exists", response.text)
         self.assertEqual(self.client.post("/taxonomy/99999/delete").status_code, 404)
+
+    def test_alias_can_be_removed_on_the_categories_page(self):
+        horror = self.category_id("Horror")
+        page = self.client.get("/taxonomy").text
+        self.assertIn(f'action="/taxonomy/{horror}/unalias"', page)
+        response = self.client.post(f"/taxonomy/{horror}/unalias", data={"alias": "horror tales"})
+        self.assertIn("no longer matches Horror", response.text)
+        card = self.card("Genre: Speculative Fiction > Horror")
+        self.assertEqual([m["match_value"] for m in card["members"]], ["horror"])
+
+    def test_import_page_explains_shelves(self):
+        self.assertIn("Your Goodreads shelves are how you organised books there", self.client.get("/import").text)
+
+    def test_novel_question_card(self):
+        conn = self.conn
+        conn.execute("UPDATE books SET subjects_json = ? WHERE goodreads_id IN ('1', '2')",
+                     (json.dumps(["Fiction", "History"]),))
+        conn.commit()
+        cat.categorize(conn)
+        for target in ("Form: Fiction", "Genre: History"):
+            self.accept(target)
+        body = self.client.get("/review").text
+        self.assertIn("Genre: History?", body)
+        self.assertIn("Open Library files these novels under “history”", body)
+        question = next(c for c in cat.list_suggestion_cards(conn) if c["kind"] == "assign")
+        response = self.client.post(f"/categories/suggestions/{question['id']}/accept")
+        self.assertIn("Added Genre: History", response.text)
 
     # --- API ------------------------------------------------------------------
 

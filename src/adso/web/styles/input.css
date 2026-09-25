@@ -480,6 +480,8 @@ a.taxcount:hover { color: var(--foreground); text-decoration: underline; }
 .taxcount.zero { color: var(--faint); }
 .taxalias { font: italic 14px var(--ital); color: var(--muted-foreground); }
 .taxactions { display: flex; flex-wrap: wrap; gap: 10px 14px; padding: 10px 12px 14px; }
+.taxaliases { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 12px 0; }
+.catcard .catbooks { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 
 /* -------------------------------------------------------- floating */
 .bulk { position: fixed; left: 50%; bottom: 26px; z-index: 40; display: flex; align-items: center; gap: 4px; padding: 6px 6px 6px 8px; border-radius: 999px; background: var(--ink); color: var(--ink-fg); box-shadow: var(--pop); transform: translate(-50%, 140%); opacity: 0; pointer-events: none; transition: transform 0.5s var(--out), opacity 0.3s var(--std); font-size: 13.5px; white-space: nowrap; }

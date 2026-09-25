@@ -51,6 +51,17 @@
           {% if node.total %}<a class="taxcount" href="/?category={{ node.id }}">{{ node.total }} book{{ "" if node.total == 1 else "s" }}</a>{% else %}<span class="taxcount zero">no books</span>{% endif %}
           {% if node.aliases %}<span class="taxalias">also: {{ node.aliases | join(", ") }}</span>{% endif %}
         </summary>
+        {% if node.aliases %}
+        <div class="taxaliases">
+          <span class="text-sm text-muted-foreground">Also matches</span>
+          {% for alias in node.aliases %}
+          <form method="post" action="/taxonomy/{{ node.id }}/unalias" class="inline">
+            <input type="hidden" name="alias" value="{{ alias }}">
+            <span class="catsrc">{{ alias }}<button type="submit" title="Stop “{{ alias }}” matching {{ node.label }}" aria-label="Remove alias {{ alias }}">×</button></span>
+          </form>
+          {% endfor %}
+        </div>
+        {% endif %}
         <div class="taxactions">
           <form method="post" action="/taxonomy/{{ node.id }}/rename" class="flex items-center gap-2">
             <input type="text" name="label" class="input h-8 w-48 text-sm" value="{{ node.label }}" aria-label="New name" required>

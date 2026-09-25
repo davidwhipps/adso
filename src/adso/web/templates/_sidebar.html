@@ -1,6 +1,7 @@
-{# Library sidebar: shelves, smart views, genres, themes, tags and Goodreads
-   shelves, each with the count that clicking it would show. Links are boosted
-   by #browse. Expects `lib`, `p`. #}
+{# Library sidebar: shelves, smart views, genres, themes and tags, each with
+   the count that clicking it would show. Custom Goodreads shelves aren't a
+   section of their own: they feed genres and tags through Review. Links are
+   boosted by #browse. Expects `lib`, `p`. #}
 <aside class="side" id="side" aria-label="Shelves and tags">
   <a href="{{ p.query(shelf='', smart='', tag='', category='', gr_shelf='', series='', book='') }}" class="nav {{ 'on' if not (p.shelf or p.smart or p.tag or p.category or p.gr_shelf or p.series) }}">Library<span class="n">{{ lib.library_count }}</span></a>
 
@@ -40,10 +41,4 @@
     {% endfor %}
   </div>
 
-  {% if lib.gr_shelves %}
-  <h5><i>06</i>Goodreads shelves</h5>
-  {% for f in lib.gr_shelves %}
-  <a href="{{ f.url }}" class="nav {{ 'on' if f.active }} {{ 'zero' if not f.count }}">{{ f.label }}<span class="n">{{ f.count }}</span></a>
-  {% endfor %}
-  {% endif %}
 </aside>

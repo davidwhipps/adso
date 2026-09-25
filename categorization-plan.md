@@ -148,6 +148,14 @@ Each book goes through a pipeline of pluggable "suggesters". Each suggester retu
    Not done:
    - The Notion export is unchanged: writing a Genre property would fail on databases that lack it. This needs an opt-in.
    - Subjects are not sidebar facets yet.
+
+   Follow-ups from testing on the real library (same PR):
+   - Custom Goodreads shelves are not a sidebar taxonomy. They fold into genres (via mappings) and **tags**: an unmatched shelf is proposed as a tag rule (`category_rules.tag`), applied once per book (`tag_rule_applications`).
+   - Subject-only nonfiction genres on fiction become grouped `assign` questions.
+   - Seed revision 2 removes the "war", "military" and "juvenile fiction" aliases.
+   - Aliases can be removed.
+   - Pending proposals are revalidated on each run.
+   - Examples show the most recently added books.
 3. **AI suggester**: the `[ai]` optional extra with the `anthropic` SDK, batching, prompt caching, cost dry-run, and proposed-category approval.
 4. **Relationships and next reads**: `related_books`, the taste profile, `adso next`, the web panel, and insight views.
 

@@ -75,8 +75,6 @@ URL_PARAMS = (
     "q", "shelf", "smart", "tag", "category", "gr_shelf", "series",
     "status", "format", "rating", "author", "sort", "view", "book",
 )
-# Custom Goodreads shelves listed in the sidebar (most-used first).
-MAX_GR_SHELVES = 40
 
 _ARTICLES = ("the ", "a ", "an ")
 
@@ -184,7 +182,6 @@ class Library:
     tags: list[Facet]
     genres: list[Facet] = field(default_factory=list)
     themes: list[Facet] = field(default_factory=list)
-    gr_shelves: list[Facet] = field(default_factory=list)
     category_label: str = ""
     chips: list[tuple[str, str]] = field(default_factory=list)  # (label, remove-url)
 
@@ -322,13 +319,6 @@ def build_library(conn: sqlite3.Connection, p: LibraryParams, cover_root: Path) 
                                  p.query(category="" if active else str(node["id"]), book=""), node["depth"]))
         return out
 
-    shelf_totals = cat.custom_shelves(conn)[:MAX_GR_SHELVES]
-    gr_shelves = [
-        Facet(name, name, count("gr_shelf", lambda b, s=name: s in b.get("shelves", [])), p.gr_shelf == name,
-              p.query(gr_shelf="" if p.gr_shelf == name else name, book=""))
-        for name, _ in shelf_totals
-    ]
-
     chips: list[tuple[str, str]] = []
     category_label = taxonomy.path(int(p.category)) if p.category else ""
     if p.series:
@@ -358,7 +348,6 @@ def build_library(conn: sqlite3.Connection, p: LibraryParams, cover_root: Path) 
         tags=tags,
         genres=category_facets("genre"),
         themes=category_facets("theme"),
-        gr_shelves=[f for f in gr_shelves if f.count or f.active],
         category_label=category_label.split(" > ")[-1] if category_label else "",
         chips=chips,
     )

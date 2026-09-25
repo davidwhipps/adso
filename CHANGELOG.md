@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Categories in the web UI, MCP and exports** (phase 2).
-  - Library sidebar: a genre tree with roll-up counts, themes, and your custom
-    Goodreads shelves. The library also filters by series, in reading order.
+  - Library sidebar: a genre tree with roll-up counts, and themes. The library
+    also filters by series, in reading order.
   - Book page and book sidebar: categories as chips grouped by facet, showing
     where each came from, with add, remove and "make primary". A series line,
     and an "In the series" strip on the full page.
@@ -33,6 +33,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - CSV and JSON exports include primary genre, categories, series and series
     position. The Notion export is unchanged, since a missing "Genre" property
     in the target database would fail every export.
+  - Goodreads shelves fold into genres and tags rather than being a taxonomy of
+    their own.
+    - A shelf that isn't a genre is proposed as a tag of the same name. Once
+      accepted, it tags those books, and new books on that shelf after each
+      sync. Each book is tagged once, so removing the tag sticks.
+    - `adso taxonomy map --to tag:NAME` makes such a rule by hand.
+    - The Import page explains how shelves are used.
+  - Open Library subjects alone no longer put a novel in a nonfiction genre
+    (History, Biography, Science and so on). Those become one grouped "is it
+    really History?" question per genre.
+  - The over-broad aliases "war", "military" (Military History) and
+    "juvenile fiction" (Children's) are removed, including from existing
+    catalogues. Aliases can now be removed with `adso taxonomy unalias` or on
+    the Categories page. Open suggestions are re-checked whenever aliases
+    change.
+  - Suggestion examples show your most recently added books.
 
 ### Changed
 - **Less manual categorisation review.** On a 1,000-book test library this cut review

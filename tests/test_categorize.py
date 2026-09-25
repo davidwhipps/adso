@@ -79,6 +79,10 @@ class CategorizeTestCase(unittest.TestCase):
                 return item
         self.fail(f"no pending proposal for {kind} {value!r}")
 
+    def tags(self, goodreads_id: str) -> list[str]:
+        row = self.conn.execute("SELECT tags_json FROM books WHERE goodreads_id = ?", (goodreads_id,)).fetchone()
+        return json.loads(row[0])
+
     def paths(self, goodreads_id: str, facet: str = "genre") -> list[str]:
         data = cat.book_categories(self.conn, self.book_id(goodreads_id))
         return sorted(entry["path"] for entry in data["by_facet"][facet])
@@ -164,7 +168,7 @@ class EngineTests(CategorizeTestCase):
         self.assertEqual(set(values[:2]), {"sci fi", "space opera"})
         self.assertEqual(self.proposal("shelf", "sci fi")["book_count"], 2)
         self.assertEqual(
-            self.proposal("shelf", "stoicism")["target"], "new Theme: Stoicism"
+            self.proposal("shelf", "stoicism")["target"], "Tag: #stoicism"
         )
 
     def test_nothing_is_assigned_without_review(self):
@@ -186,11 +190,13 @@ class EngineTests(CategorizeTestCase):
         pending_values = [item["match_value"] for item in cat.list_suggestions(self.conn)]
         self.assertNotIn("sci fi", pending_values)
 
-    def test_accept_as_redirects_and_new_theme_is_created(self):
+    def test_accept_as_redirects_and_unmatched_shelf_becomes_a_tag(self):
         self.sync(LIBRARY)
         cat.categorize(self.conn)
-        cat.accept_suggestion(self.conn, self.proposal("shelf", "stoicism")["id"])
-        self.assertEqual(self.paths("5", "theme"), ["Stoicism"])
+        outcome = cat.accept_suggestion(self.conn, self.proposal("shelf", "stoicism")["id"])
+        self.assertEqual((outcome["category"], outcome["books"]), ("Tag: #stoicism", 1))
+        self.assertEqual(self.tags("5"), ["stoicism"])
+        self.assertEqual(self.paths("5", "theme"), [])
         cat.accept_suggestion(
             self.conn, self.proposal("shelf", "philosophy")["id"], as_category="Religion & Spirituality"
         )
@@ -384,7 +390,7 @@ class GroupedReviewTests(CategorizeTestCase):
         values = sorted(m["match_value"] for m in card["members"])
         self.assertEqual(values, ["fiction horror", "horror", "horror tales"])
         self.assertEqual(card["book_count"], 4)  # books 1-4, counted once each
-        themes = [c for c in cat.list_suggestion_cards(self.conn) if c["target"] == "new Theme: Stoicism"]
+        themes = [c for c in cat.list_suggestion_cards(self.conn) if c["target"] == "Tag: #stoicism"]
         self.assertEqual(len(themes[0]["members"]), 1)
 
     def test_accepting_any_member_accepts_the_card(self):
@@ -486,6 +492,155 @@ class PrimaryDefaultTests(CategorizeTestCase):
         cat.categorize(self.conn)
         self.assertEqual(self.primary("1"), "Speculative Fiction > Science Fiction > Space Opera")
         self.assertEqual(self.questions(), [])
+
+
+class ShelfTagTests(CategorizeTestCase):
+    """Shelves that aren't genres become the user's tags."""
+
+    def test_tag_rule_tags_once_and_follows_new_books(self):
+        self.sync(LIBRARY)
+        cat.categorize(self.conn)
+        cat.accept_suggestion(self.conn, self.proposal("shelf", "stoicism")["id"])
+        self.assertEqual(self.tags("5"), ["stoicism"])
+        # Removing the tag sticks: the rule already applied to this book.
+        db.update_local_fields(self.conn, "5", {"tags_json": []})
+        cat.categorize(self.conn)
+        self.assertEqual(self.tags("5"), [])
+        # A new book on the same shelf is tagged on the next sync.
+        self.sync([*LIBRARY, book("9", "Letters from a Stoic", "to-read, stoicism")], name="later.csv")
+        result = cat.categorize(self.conn)
+        self.assertEqual(result["tagged"], 1)
+        self.assertEqual(self.tags("9"), ["stoicism"])
+        # Unmapping stops future tagging but leaves the tags the user has.
+        rule = next(r for r in cat.list_rules(self.conn) if r["tag"] == "stoicism")
+        self.assertEqual((rule["category"], rule["books"]), ("Tag: #stoicism", 2))
+        cat.delete_rule(self.conn, rule["id"])
+        self.assertEqual(self.tags("9"), ["stoicism"])
+
+    def test_manual_tag_rule_and_accept_as_tag(self):
+        self.sync(LIBRARY)
+        cat.categorize(self.conn)
+        outcome = cat.add_rule(self.conn, "shelf", "favorites", "tag:Keepers")
+        self.assertEqual((outcome["category"], outcome["books"]), ("Tag: #keepers", 1))
+        self.assertEqual(self.tags("3"), ["keepers"])
+        cat.accept_suggestion(self.conn, self.proposal("shelf", "philosophy")["id"], as_category="tag:philosophy")
+        self.assertEqual(self.tags("5"), ["philosophy"])
+        self.assertEqual(self.paths("5"), [])
+
+
+class FictionGuardTests(CategorizeTestCase):
+    """Open Library subjects alone can't put a novel in a nonfiction genre."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.sync([
+            book("1", "A Brief History of Seven Killings", "read"),
+            book("2", "The Guns of August", "read"),
+            book("3", "Wolf Hall", "read, history"),
+            book("4", "The Blind Assassin", "read"),
+        ])
+        subjects = {
+            "1": ["Fiction", "History"],
+            "2": ["History", "World War, 1914-1918"],
+            "3": ["Fiction", "History"],
+            "4": ["Fiction", "History"],
+        }
+        for gid, values in subjects.items():
+            self.conn.execute("UPDATE books SET subjects_json = ? WHERE goodreads_id = ?", (json.dumps(values), gid))
+        self.conn.commit()
+        cat.categorize(self.conn)
+        for card in cat.list_suggestion_cards(self.conn):
+            if card["target"] in ("Form: Fiction", "Genre: History"):
+                cat.accept_suggestion(self.conn, card["id"])
+
+    def question(self) -> dict:
+        return next(c for c in cat.list_suggestion_cards(self.conn) if c["kind"] == "assign")
+
+    def test_novels_are_asked_about_not_filed(self):
+        self.assertEqual(self.paths("2"), ["History"])  # nonfiction: filed directly
+        self.assertEqual(self.paths("3"), ["History"])  # your own shelf says so
+        self.assertEqual(self.paths("1"), [])
+        self.assertEqual(self.paths("4"), [])
+        card = self.question()
+        self.assertEqual(card["target"], "Genre: History")
+        self.assertEqual(sorted(m["book_id"] for m in card["members"]), [self.book_id("1"), self.book_id("4")])
+
+    def test_answers_are_remembered(self):
+        card = self.question()
+        keep = next(m for m in card["members"] if m["book_id"] == self.book_id("4"))
+        cat.reject_suggestion(self.conn, keep["id"], only=True)
+        cat.accept_suggestion(self.conn, self.question()["id"])
+        self.assertEqual(self.paths("1"), ["History"])
+        self.assertEqual(self.paths("4"), [])
+        cat.categorize(self.conn)
+        self.assertEqual(self.paths("4"), [])
+        self.assertFalse([c for c in cat.list_suggestion_cards(self.conn) if c["kind"] == "assign"])
+
+
+class AliasAndSeedTests(CategorizeTestCase):
+    def test_removing_an_alias_withdraws_suggestions_that_needed_it(self):
+        self.sync([book("1", "Slaughterhouse-Five", "read")])
+        self.conn.execute("UPDATE books SET subjects_json = ? WHERE goodreads_id = '1'", (json.dumps(["War"]),))
+        self.conn.commit()
+        cat.add_alias(self.conn, "Military History", "war")
+        self.assertEqual(self.proposal("subject", "war")["target"], "Genre: History > Military History")
+        cat.remove_alias(self.conn, "Military History", "war")
+        values = [i["match_value"] for i in cat.list_suggestions(self.conn)]
+        self.assertNotIn("war", values)
+        with self.assertRaises(cat.CategoryError):
+            cat.remove_alias(self.conn, "Military History", "war")
+
+    def test_older_catalogues_get_the_seed_revision(self):
+        taxonomy = cat.Taxonomy(self.conn)
+        self.assertEqual(taxonomy.match_term("war"), [])
+        self.assertEqual(taxonomy.match_term("juvenile fiction"), [])
+        # Pretend this catalogue was seeded before revision 2.
+        military = taxonomy.resolve("Military History").id
+        self.conn.execute("INSERT INTO category_aliases (category_id, alias) VALUES (?, 'war')", (military,))
+        self.conn.execute("DELETE FROM category_aliases WHERE alias = 'lit fic'")
+        self.conn.execute("DELETE FROM adso_meta WHERE key = 'taxonomy_seed_rev'")
+        self.conn.commit()
+        db.initialize(self.conn)
+        taxonomy = cat.Taxonomy(self.conn)
+        self.assertEqual(taxonomy.match_term("war"), [])
+        self.assertEqual(taxonomy.get(taxonomy.match_term("lit fic")[0]).label, "Literary Fiction")
+
+    def test_phase_one_rules_table_is_migrated_without_losing_assignments(self):
+        self.sync(LIBRARY)
+        cat.categorize(self.conn)
+        cat.accept_suggestion(self.conn, self.proposal("shelf", "sci fi")["id"])
+        rule_id = cat.list_rules(self.conn)[0]["id"]
+        # Rebuild category_rules in its phase-1 shape (no tag, NOT NULL category).
+        self.conn.execute("PRAGMA foreign_keys = OFF")
+        self.conn.executescript(
+            """
+            DROP INDEX IF EXISTS idx_category_rules_identity;
+            CREATE TABLE old_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, match_kind TEXT NOT NULL, match_value TEXT NOT NULL,
+                category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+                created_by TEXT NOT NULL DEFAULT 'cli', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(match_kind, match_value, category_id));
+            INSERT INTO old_rules SELECT id, match_kind, match_value, category_id, created_by, created_at
+                FROM category_rules;
+            DROP TABLE tag_rule_applications;
+            DROP TABLE category_rules;
+            ALTER TABLE old_rules RENAME TO category_rules;
+            """
+        )
+        self.conn.execute("PRAGMA foreign_keys = ON")
+        db.initialize(self.conn)
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(category_rules)")}
+        self.assertIn("tag", columns)
+        self.assertEqual(cat.list_rules(self.conn)[0]["id"], rule_id)
+        self.assertEqual(self.paths("1"), ["Speculative Fiction > Science Fiction"])
+        self.assertEqual(cat.list_rules(self.conn)[0]["books"], 2)
+
+    def test_examples_are_the_most_recently_added(self):
+        rows = [dict(book(str(i), f"Title {i}", "read, obscure-shelf"), **{"Date Added": f"2024/01/{i:02d}"})
+                for i in range(1, 6)]
+        self.sync(rows)
+        cat.categorize(self.conn)
+        self.assertEqual(self.proposal("shelf", "obscure shelf")["evidence"], "e.g. Title 5; Title 4; Title 3")
 
 
 class ExportTests(CategorizeTestCase):

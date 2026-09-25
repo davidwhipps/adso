@@ -451,6 +451,27 @@ def add_alias(conn: sqlite3.Connection, reference: str, alias: str) -> Category:
         (category.id, alias.strip()),
     )
     conn.commit()
+    categorize(conn)  # open suggestions pick up the new match straight away
+    return category
+
+
+def remove_alias(conn: sqlite3.Connection, reference: str, alias: str) -> Category:
+    """Stop an alternative name from matching a category.
+
+    Open suggestions that relied on it are re-checked straight away. Rules the
+    user already accepted are explicit and stay; remove those from the rules
+    list if they're wrong too.
+    """
+    category = Taxonomy(conn).resolve(reference)
+    wanted = normalize_term(alias)
+    rows = conn.execute("SELECT alias FROM category_aliases WHERE category_id = ?", (category.id,)).fetchall()
+    matches = [row["alias"] for row in rows if normalize_term(row["alias"]) == wanted]
+    if not matches:
+        raise CategoryError(f"{category.label} has no alias {alias!r}")
+    for name in matches:
+        conn.execute("DELETE FROM category_aliases WHERE category_id = ? AND alias = ?", (category.id, name))
+    conn.commit()
+    categorize(conn)
     return category
 
 
@@ -870,12 +891,26 @@ def _apply_series(conn: sqlite3.Connection, books: list[sqlite3.Row]) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _tag_target(reference: str) -> str | None:
+    """The tag a rule reference names ("tag:comfort reads"), or None for a category."""
+    raw = str(reference).strip()
+    if raw.lower().startswith("tag:"):
+        tag = " ".join(raw[4:].strip().lstrip("#").lower().split())
+        if not tag:
+            raise CategoryError("Empty tag name")
+        return tag
+    return None
+
+
 def list_rules(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     taxonomy = Taxonomy(conn)
     rows = conn.execute(
         """
-        SELECT r.id, r.match_kind, r.match_value, r.category_id, r.created_by,
-               (SELECT COUNT(*) FROM book_categories bc WHERE bc.rule_id = r.id) AS books
+        SELECT r.id, r.match_kind, r.match_value, r.category_id, r.tag, r.created_by,
+               CASE WHEN r.tag IS NULL
+                    THEN (SELECT COUNT(*) FROM book_categories bc WHERE bc.rule_id = r.id)
+                    ELSE (SELECT COUNT(*) FROM tag_rule_applications ta WHERE ta.rule_id = r.id)
+               END AS books
         FROM category_rules r ORDER BY r.match_kind, r.match_value, r.id
         """
     ).fetchall()
@@ -885,12 +920,13 @@ def list_rules(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             "match_kind": row["match_kind"],
             "match_label": MATCH_KIND_LABELS.get(row["match_kind"], row["match_kind"]),
             "match_value": row["match_value"],
-            "category": taxonomy.display(row["category_id"]),
+            "category": f"Tag: #{row['tag']}" if row["tag"] else taxonomy.display(row["category_id"]),
+            "tag": row["tag"],
             "books": row["books"],
             "created_by": row["created_by"],
         }
         for row in rows
-        if row["category_id"] in taxonomy.by_id
+        if row["tag"] or row["category_id"] in taxonomy.by_id
     ]
 
 
@@ -902,14 +938,15 @@ def add_rule(
     *,
     actor: str = "cli",
 ) -> dict[str, Any]:
-    """Map a shelf/subject/tag to a category and apply it across the library."""
+    """Map a shelf/subject/tag to a category (or to a tag, "tag:name") across the library."""
     if match_kind not in MATCH_KINDS:
         raise CategoryError(f"Unknown match kind {match_kind!r}; expected one of {', '.join(MATCH_KINDS)}")
     value = normalize_term(match_value)
     if not value:
         raise CategoryError(f"Nothing to match in {match_value!r}")
-    category = Taxonomy(conn).resolve(reference)
-    rule_id = _insert_rule(conn, match_kind, value, category.id, actor=actor)
+    tag = _tag_target(reference)
+    category_id = None if tag else Taxonomy(conn).resolve(reference).id
+    rule_id = _insert_rule(conn, match_kind, value, category_id, tag=tag, actor=actor)
     # A manual mapping answers any open proposal for the same value.
     conn.execute(
         """
@@ -917,38 +954,52 @@ def add_rule(
         SET status = 'accepted', category_id = ?, decided_at = CURRENT_TIMESTAMP, decided_by = ?
         WHERE kind = 'map' AND match_kind = ? AND match_value = ? AND status = 'pending'
         """,
-        (category.id, actor, match_kind, value),
+        (category_id, actor, match_kind, value),
     )
     conn.commit()
     result = categorize(conn)
-    books = conn.execute(
-        "SELECT COUNT(*) FROM book_categories WHERE rule_id = ?", (rule_id,)
-    ).fetchone()[0]
-    return {"rule_id": rule_id, "category": Taxonomy(conn).display(category.id), "books": books, "run": result}
+    rule = next(r for r in list_rules(conn) if r["id"] == rule_id)
+    return {"rule_id": rule_id, "category": rule["category"], "books": rule["books"], "run": result}
 
 
-def _insert_rule(conn: sqlite3.Connection, match_kind: str, value: str, category_id: int, *, actor: str) -> int:
+def _insert_rule(
+    conn: sqlite3.Connection,
+    match_kind: str,
+    value: str,
+    category_id: int | None,
+    *,
+    tag: str | None = None,
+    actor: str,
+) -> int:
     conn.execute(
         """
-        INSERT OR IGNORE INTO category_rules (match_kind, match_value, category_id, created_by)
-        VALUES (?, ?, ?, ?)
+        INSERT OR IGNORE INTO category_rules (match_kind, match_value, category_id, tag, created_by)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (match_kind, value, category_id, actor),
+        (match_kind, value, category_id, tag, actor),
     )
     return int(
         conn.execute(
-            "SELECT id FROM category_rules WHERE match_kind = ? AND match_value = ? AND category_id = ?",
-            (match_kind, value, category_id),
+            """
+            SELECT id FROM category_rules WHERE match_kind = ? AND match_value = ?
+                AND COALESCE(category_id, 0) = ? AND COALESCE(tag, '') = ?
+            """,
+            (match_kind, value, category_id or 0, tag or ""),
         ).fetchone()[0]
     )
 
 
 def delete_rule(conn: sqlite3.Connection, rule_id: int) -> dict[str, Any]:
-    """Remove a rule and the assignments it made (user-confirmed ones stay)."""
+    """Remove a rule and the category assignments it made.
+
+    User-confirmed categories stay, and so do tags a tag rule added: once on a
+    book, a tag is the user's.
+    """
     rules = {rule["id"]: rule for rule in list_rules(conn)}
     if rule_id not in rules:
         raise CategoryError(f"No rule with id {rule_id}", hint="Run `adso taxonomy rules` to list them.")
     conn.execute("DELETE FROM book_categories WHERE rule_id = ?", (rule_id,))
+    conn.execute("DELETE FROM tag_rule_applications WHERE rule_id = ?", (rule_id,))
     conn.execute("DELETE FROM category_rules WHERE id = ?", (rule_id,))
     _settle_primaries(conn, Taxonomy(conn))
     conn.commit()
@@ -980,22 +1031,63 @@ def _book_signals(book: sqlite3.Row) -> dict[tuple[str, str], str]:
     return signals
 
 
+# Top-level seed genres that are nonfiction. An Open Library subject alone
+# can't put a novel in one of these (OL tags novels "history", "war",
+# "biography"...): that becomes a question instead. Keyed by slug so a
+# renamed category keeps its meaning only if the user kept the slug's words.
+NONFICTION_GENRE_ROOTS = frozenset(
+    {
+        "history",
+        "biography-and-memoir",
+        "philosophy",
+        "religion-and-spirituality",
+        "science",
+        "psychology",
+        "politics-and-society",
+        "economics-and-business",
+        "self-help",
+        "technology",
+        "art-and-design",
+        "food-and-cooking",
+        "travel",
+    }
+)
+
+
+def _nonfiction_genres(taxonomy: Taxonomy) -> set[int]:
+    return {
+        cid
+        for cid, node in taxonomy.by_id.items()
+        if node.facet == "genre" and taxonomy.lineage(cid)[0].slug in NONFICTION_GENRE_ROOTS
+    }
+
+
+def _form_id(taxonomy: Taxonomy, slug: str) -> int | None:
+    return next((c.id for c in taxonomy.by_id.values() if c.facet == "form" and c.slug == slug), None)
+
+
 def categorize(conn: sqlite3.Connection, *, dry_run: bool = False) -> dict[str, int]:
     """Apply accepted rules, parse series, settle primaries, raise new proposals.
 
-    Safe to run any time: it only ever writes rule-sourced assignments, title
-    series and pending suggestions. With ``dry_run`` everything is computed and
-    counted, then rolled back.
+    Safe to run any time: it only ever writes rule-sourced assignments, tags
+    from tag rules (once per book), title series and pending suggestions.
+    With ``dry_run`` everything is computed and counted, then rolled back.
     """
     conn.commit()  # never roll back someone else's pending work on dry_run
     taxonomy = Taxonomy(conn)
     books = conn.execute(
-        "SELECT id, title, exclusive_shelf, shelves_json, subjects_json, tags_json FROM books"
+        "SELECT id, title, date_added, exclusive_shelf, shelves_json, subjects_json, tags_json FROM books"
     ).fetchall()
 
-    rules: dict[tuple[str, str], list[tuple[int, int]]] = defaultdict(list)
-    for rule in conn.execute("SELECT id, match_kind, match_value, category_id FROM category_rules"):
-        rules[(rule["match_kind"], rule["match_value"])].append((rule["id"], rule["category_id"]))
+    category_rules: dict[tuple[str, str], list[tuple[int, int]]] = defaultdict(list)
+    tag_rules: dict[tuple[str, str], list[tuple[int, str]]] = defaultdict(list)
+    for rule in conn.execute("SELECT id, match_kind, match_value, category_id, tag FROM category_rules"):
+        key = (rule["match_kind"], rule["match_value"])
+        if rule["tag"]:
+            tag_rules[key].append((rule["id"], rule["tag"]))
+        elif rule["category_id"] in taxonomy.by_id:
+            category_rules[key].append((rule["id"], rule["category_id"]))
+    applied = {(row[0], row[1]) for row in conn.execute("SELECT rule_id, book_id FROM tag_rule_applications")}
     exclusions = {
         (row["book_id"], row["category_id"])
         for row in conn.execute("SELECT book_id, category_id FROM category_exclusions")
@@ -1003,25 +1095,59 @@ def categorize(conn: sqlite3.Connection, *, dry_run: bool = False) -> dict[str, 
     current: dict[int, dict[int, sqlite3.Row]] = defaultdict(dict)
     for row in conn.execute("SELECT book_id, category_id, source, rule_id FROM book_categories"):
         current[row["book_id"]][row["category_id"]] = row
+    nonfiction = _nonfiction_genres(taxonomy)
+    fiction_id = _form_id(taxonomy, "fiction")
+    nonfiction_form_id = _form_id(taxonomy, "nonfiction")
 
     series_changed = _apply_series(conn, books)
 
-    assigned = removed = 0
+    assigned = removed = tagged = 0
     unmatched: dict[tuple[str, str], dict[str, Any]] = {}
+    questions: dict[tuple[int, int], str] = {}
     for book in books:
         desired: dict[int, tuple[int, str]] = {}
+        kinds: dict[int, set[str]] = defaultdict(set)
+        new_tags: list[str] = []
         for (kind, value), original in _book_signals(book).items():
-            matched_rules = rules.get((kind, value))
-            if not matched_rules:
-                slot = unmatched.setdefault((kind, value), {"original": original, "titles": []})
-                slot["titles"].append(book["title"])
+            matched = category_rules.get((kind, value), [])
+            tagging = tag_rules.get((kind, value), [])
+            if not matched and not tagging:
+                slot = unmatched.setdefault((kind, value), {"original": original, "books": []})
+                slot["books"].append((book["date_added"] or "", book["title"]))
                 continue
-            for rule_id, category_id in matched_rules:
+            for rule_id, category_id in matched:
                 if (book["id"], category_id) in exclusions:
                     continue
                 desired.setdefault(category_id, (rule_id, f"{MATCH_KIND_LABELS[kind]}: {original}"))
+                kinds[category_id].add(kind)
+            for rule_id, tag in tagging:
+                if (rule_id, book["id"]) not in applied:
+                    new_tags.append(tag)
+                    conn.execute(
+                        "INSERT OR IGNORE INTO tag_rule_applications (rule_id, book_id) VALUES (?, ?)",
+                        (rule_id, book["id"]),
+                    )
 
         existing = current.get(book["id"], {})
+        # A novel isn't History just because Open Library says "history": a
+        # nonfiction genre that only subjects support becomes a question.
+        chosen = set(desired) | {cid for cid, row in existing.items() if row["source"] != "rule"}
+        if fiction_id in chosen and nonfiction_form_id not in chosen:
+            for category_id in [c for c in desired if c in nonfiction and kinds[c] <= {"subject"}]:
+                if category_id not in existing or existing[category_id]["source"] == "rule":
+                    questions[(book["id"], category_id)] = desired[category_id][1]
+                    del desired[category_id]
+
+        if new_tags:
+            tags = json.loads(book["tags_json"] or "[]")
+            merged = tags + [t for t in dict.fromkeys(new_tags) if t not in tags]
+            if merged != tags:
+                conn.execute(
+                    "UPDATE books SET tags_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (json.dumps(merged), book["id"]),
+                )
+                tagged += len(merged) - len(tags)
+
         for category_id, row in existing.items():
             if row["source"] == "rule" and category_id not in desired:
                 conn.execute(
@@ -1049,6 +1175,7 @@ def categorize(conn: sqlite3.Connection, *, dry_run: bool = False) -> dict[str, 
                     (rule_id, evidence, book["id"], category_id),
                 )
 
+    fiction_questions = _raise_fiction_questions(conn, questions)
     primaries_set, primaries_suggested = _settle_primaries(conn, taxonomy)
     proposals = _propose_mappings(conn, taxonomy, unmatched)
 
@@ -1063,12 +1190,56 @@ def categorize(conn: sqlite3.Connection, *, dry_run: bool = False) -> dict[str, 
         "books": len(books),
         "assigned": assigned,
         "removed": removed,
+        "tagged": tagged,
         "series": series_changed,
         "primaries_set": primaries_set,
-        "primaries_suggested": primaries_suggested,
+        "primaries_suggested": primaries_suggested + fiction_questions,
         "new_proposals": proposals,
         "pending": pending,
     }
+
+
+def _raise_fiction_questions(conn: sqlite3.Connection, questions: dict[tuple[int, int], str]) -> int:
+    """Ask about nonfiction genres that only Open Library puts on a novel.
+
+    One 'assign' suggestion per book, grouped per genre on the review card.
+    Decided ones stay decided; ones whose situation changed are withdrawn.
+    """
+    existing = {
+        (row["book_id"], row["category_id"]): row
+        for row in conn.execute(
+            "SELECT id, book_id, category_id, status FROM category_suggestions "
+            "WHERE kind = 'assign' AND proposed_by = 'adso'"
+        )
+    }
+    raised = 0
+    for (book_id, category_id), evidence in questions.items():
+        row = existing.get((book_id, category_id))
+        if row is not None:
+            if row["status"] == "superseded":
+                conn.execute(
+                    "UPDATE category_suggestions SET status = 'pending', decided_at = NULL WHERE id = ?",
+                    (row["id"],),
+                )
+            continue
+        subject = evidence.split(": ", 1)[-1]
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO category_suggestions
+                (kind, book_id, category_id, match_kind, match_value, confidence, book_count, evidence, proposed_by)
+            VALUES ('assign', ?, ?, 'subject', ?, 0.4, 1, ?, 'adso')
+            """,
+            (book_id, category_id, normalize_term(subject),
+             f"Open Library files this novel under “{subject}”", ),
+        )
+        raised += 1
+    for key, row in existing.items():
+        if row["status"] == "pending" and key not in questions:
+            conn.execute(
+                "UPDATE category_suggestions SET status = 'superseded', decided_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (row["id"],),
+            )
+    return raised
 
 
 def _settle_primaries(
@@ -1277,7 +1448,7 @@ def _guess_category(
     """Best category for an unmatched value: (category_id, confidence, new_label).
 
     ``None`` means "don't propose anything". A ``None`` category with a label
-    means "propose a new theme named after the user's own shelf".
+    means "propose tagging the books with the user's own shelf name".
     """
     exact = taxonomy.match_term(value)
     if exact:
@@ -1296,58 +1467,72 @@ def _guess_category(
     ranked = taxonomy._rank(partial)
     if len(ranked) == 1:
         return ranked[0], CONFIDENCE_PARTIAL_SHELF, None
-    label = value[:1].upper() + value[1:]
-    return None, CONFIDENCE_NEW_THEME, label
+    # Not a genre: the user's own shelf becomes one of their tags.
+    return None, CONFIDENCE_NEW_THEME, value
 
 
 def _propose_mappings(
     conn: sqlite3.Connection, taxonomy: Taxonomy, unmatched: dict[tuple[str, str], dict[str, Any]]
 ) -> int:
-    """Turn unmatched evidence into (at most one) mapping proposal per value."""
+    """Turn unmatched evidence into (at most one) mapping proposal per value.
+
+    Open proposals are re-checked against the current taxonomy each run, so
+    renaming, aliasing or removing an alias updates or withdraws them.
+    """
     existing = {
         (row["match_kind"], row["match_value"]): row
         for row in conn.execute(
-            "SELECT id, match_kind, match_value, status FROM category_suggestions WHERE kind = 'map'"
+            "SELECT id, match_kind, match_value, status, category_id, proposed_facet, proposed_label "
+            "FROM category_suggestions WHERE kind = 'map'"
         )
     }
     created = 0
     for (kind, value), info in unmatched.items():
-        titles = info["titles"]
-        examples = "e.g. " + "; ".join(sorted(titles)[:_EXAMPLE_TITLES])
+        # Most recently added first: the books the user is likeliest to recognise.
+        recent = sorted(info["books"], key=lambda b: (b[0], b[1]), reverse=True)
+        examples = "e.g. " + "; ".join(title for _, title in recent[:_EXAMPLE_TITLES])
+        guess = _guess_category(taxonomy, kind, value)
+        target: tuple[Any, ...] = (None, None, None, 0.0)
+        if guess is not None:
+            category_id, confidence, new_label = guess
+            if new_label is not None:
+                # The user's own shelf name, as Goodreads spells it, becomes a tag.
+                target = (None, "tag", " ".join(str(info["original"]).lower().split()), confidence)
+            else:
+                target = (category_id, None, None, confidence)
         row = existing.get((kind, value))
         if row is not None:
-            # Superseded means "the evidence went away"; it's back, so ask again.
-            if row["status"] in ("pending", "superseded"):
-                conn.execute(
-                    """
-                    UPDATE category_suggestions
-                    SET book_count = ?, evidence = ?, status = 'pending', decided_at = NULL
-                    WHERE id = ?
-                    """,
-                    (len(titles), examples, row["id"]),
-                )
+            if row["status"] not in ("pending", "superseded"):
+                continue
+            if guess is None:
+                if row["status"] == "pending":
+                    conn.execute(
+                        "UPDATE category_suggestions SET status = 'superseded', decided_at = CURRENT_TIMESTAMP "
+                        "WHERE id = ?",
+                        (row["id"],),
+                    )
+                continue
+            # Superseded means "the evidence or match went away"; it's back, so ask again.
+            conn.execute(
+                """
+                UPDATE category_suggestions
+                SET book_count = ?, evidence = ?, status = 'pending', decided_at = NULL,
+                    category_id = ?, proposed_facet = ?, proposed_label = ?, confidence = ?
+                WHERE id = ?
+                """,
+                (len(info["books"]), examples, *target, row["id"]),
+            )
             continue
-        guess = _guess_category(taxonomy, kind, value)
         if guess is None:
             continue
-        category_id, confidence, new_label = guess
         conn.execute(
             """
             INSERT INTO category_suggestions
                 (kind, match_kind, match_value, category_id, proposed_facet, proposed_label,
-                 confidence, book_count, evidence)
-            VALUES ('map', ?, ?, ?, ?, ?, ?, ?, ?)
+                 confidence, book_count, evidence, proposed_by)
+            VALUES ('map', ?, ?, ?, ?, ?, ?, ?, ?, 'adso')
             """,
-            (
-                kind,
-                value,
-                category_id,
-                "theme" if new_label else None,
-                new_label,
-                confidence,
-                len(titles),
-                examples,
-            ),
+            (kind, value, *target, len(info["books"]), examples),
         )
         created += 1
     # A pending mapping whose evidence has vanished from the library (shelf
@@ -1560,6 +1745,8 @@ def list_suggestions(conn: sqlite3.Connection, *, status: str = "pending") -> li
 def _describe_suggestion(taxonomy: Taxonomy, row: sqlite3.Row) -> dict[str, Any]:
     if row["category_id"] is not None and row["category_id"] in taxonomy.by_id:
         target = taxonomy.display(row["category_id"])
+    elif row["proposed_label"] and row["proposed_facet"] == "tag":
+        target = f"Tag: #{row['proposed_label']}"
     elif row["proposed_label"]:
         facet = FACET_LABELS.get(row["proposed_facet"] or "theme", "Theme")
         target = f"new {facet}: {row['proposed_label']}"
@@ -1601,7 +1788,18 @@ def _get_suggestion(conn: sqlite3.Connection, suggestion_id: int) -> sqlite3.Row
 
 
 def _group_key(row: sqlite3.Row | dict[str, Any]) -> tuple:
-    """Mapping suggestions with the same target form one review card."""
+    """Suggestions that share a key form one review card.
+
+    Mappings group by target (a shelf and every Open Library spelling of the
+    same genre). Adso's "is this novel really History?" questions group by
+    genre and subject. Everything else is a card of its own.
+    """
+    if row["kind"] == "assign":
+        if row["match_kind"]:
+            return ("assign", row["category_id"], row["match_kind"], row["match_value"])
+        return ("single", row["id"])
+    if row["kind"] != "map":
+        return ("single", row["id"])
     if row["category_id"] is not None:
         return ("category", row["category_id"])
     return ("new", row["proposed_facet"] or "theme", normalize_term(row["proposed_label"] or ""))
@@ -1610,11 +1808,10 @@ def _group_key(row: sqlite3.Row | dict[str, Any]) -> tuple:
 def pending_card_count(conn: sqlite3.Connection) -> int:
     """How many review cards are open (cheap: no book scan)."""
     rows = conn.execute(
-        "SELECT kind, category_id, proposed_facet, proposed_label FROM category_suggestions WHERE status = 'pending'"
+        "SELECT id, kind, category_id, proposed_facet, proposed_label, match_kind, match_value "
+        "FROM category_suggestions WHERE status = 'pending'"
     ).fetchall()
-    return len({_group_key(row) for row in rows if row["kind"] == "map"}) + sum(
-        1 for row in rows if row["kind"] != "map"
-    )
+    return len({_group_key(row) for row in rows})
 
 
 def suggestion_group(conn: sqlite3.Connection, suggestion_id: int) -> list[int]:
@@ -1625,13 +1822,13 @@ def suggestion_group(conn: sqlite3.Connection, suggestion_id: int) -> list[int]:
     primary-genre question is always a card of its own.
     """
     row = _get_suggestion(conn, suggestion_id)
-    if row["kind"] != "map":
-        return [suggestion_id]
     key = _group_key(row)
+    if key[0] == "single":
+        return [suggestion_id]
     siblings = conn.execute(
-        "SELECT id, category_id, proposed_facet, proposed_label FROM category_suggestions "
-        "WHERE kind = 'map' AND status = ?",
-        (row["status"],),
+        "SELECT id, kind, category_id, proposed_facet, proposed_label, match_kind, match_value "
+        "FROM category_suggestions WHERE kind = ? AND status = ?",
+        (row["kind"], row["status"]),
     ).fetchall()
     return sorted(sibling["id"] for sibling in siblings if _group_key(sibling) == key)
 
@@ -1660,11 +1857,17 @@ def list_suggestion_cards(conn: sqlite3.Connection, *, status: str = "pending") 
     groups: dict[tuple, list[dict[str, Any]]] = defaultdict(list)
     cards: list[dict[str, Any]] = []
     for item in items:
-        if item["kind"] == "map":
-            groups[_group_key(item)].append(item)
-        else:
+        key = _group_key(item)
+        if key[0] == "single":
             cards.append({**item, "members": [item]})
-    for members in groups.values():
+        else:
+            groups[key].append(item)
+    for key, members in groups.items():
+        if key[0] == "assign":
+            # One question per book, asked together: "History for these novels?"
+            members.sort(key=lambda m: m["subject"].lower())
+            cards.append({**members[0], "book_count": len(members), "members": members})
+            continue
         members.sort(key=lambda m: -(m["book_count"] * m["confidence"]))
         books: set[int] = set()
         for member in members:
@@ -1709,6 +1912,24 @@ def accept_suggestion(
             hint=f"Reopen it first with `adso review {suggestion_id} --reopen`.",
         )
     taxonomy = Taxonomy(conn)
+    tag = _tag_target(as_category) if as_category and row["kind"] == "map" else None
+    if tag is None and not as_category and row["kind"] == "map" and row["proposed_facet"] == "tag":
+        tag = row["proposed_label"]
+    if tag is not None:
+        members = [suggestion_id] if only else suggestion_group(conn, suggestion_id)
+        _mark(conn, members, "accepted", actor)
+        rule_ids = [
+            _insert_rule(conn, member["match_kind"], member["match_value"], None, tag=tag, actor=actor)
+            for member in (_get_suggestion(conn, member_id) for member_id in members)
+        ]
+        conn.commit()
+        run = categorize(conn)
+        placeholders = ", ".join("?" for _ in rule_ids)
+        books = conn.execute(
+            f"SELECT COUNT(DISTINCT book_id) FROM tag_rule_applications WHERE rule_id IN ({placeholders})",
+            rule_ids,
+        ).fetchone()[0]
+        return {"kind": "map", "category": f"Tag: #{tag}", "books": books, "sources": len(members), "run": run}
     if as_category:
         facet = "genre" if row["kind"] == "primary" else None
         category_id = taxonomy.resolve(as_category, facet=facet).id
@@ -1733,12 +1954,18 @@ def accept_suggestion(
         conn.commit()
         return {"kind": "primary", "category": Taxonomy(conn).display(category_id), "books": 1, "sources": 1}
     if row["kind"] == "assign":
-        _mark(conn, [suggestion_id], "accepted", actor, category_id=category_id)
+        members = [suggestion_id] if only else suggestion_group(conn, suggestion_id)
+        _mark(conn, members, "accepted", actor, category_id=category_id)
+        book_ids = {_get_suggestion(conn, member_id)["book_id"] for member_id in members}
         # Accepting is the user's decision, so it lands as a user assignment.
-        _upsert_user_assignment(conn, row["book_id"], category_id, role=None)
-        _settle_primaries(conn, Taxonomy(conn), book_ids={row["book_id"]})
+        for book_id in book_ids:
+            _upsert_user_assignment(conn, book_id, category_id, role=None)
+        _settle_primaries(conn, Taxonomy(conn), book_ids=book_ids)
         conn.commit()
-        return {"kind": "assign", "category": Taxonomy(conn).display(category_id), "books": 1, "sources": 1}
+        return {
+            "kind": "assign", "category": Taxonomy(conn).display(category_id), "books": len(book_ids),
+            "sources": len(members),
+        }
 
     members = [suggestion_id] if only else suggestion_group(conn, suggestion_id)
     _mark(conn, members, "accepted", actor, category_id=category_id)

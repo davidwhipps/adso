@@ -458,10 +458,11 @@ def _migrate_categories(conn: sqlite3.Connection) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             match_kind TEXT NOT NULL,
             match_value TEXT NOT NULL,
-            category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+            category_id INTEGER REFERENCES categories(id) ON DELETE CASCADE,
+            tag TEXT,
             created_by TEXT NOT NULL DEFAULT 'cli',
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(match_kind, match_value, category_id)
+            CHECK ((category_id IS NULL) != (tag IS NULL))
         );
 
         CREATE TABLE IF NOT EXISTS book_categories (
@@ -528,12 +529,74 @@ def _migrate_categories(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_book_series_series ON book_series(series_id);
         """
     )
+    _migrate_tag_rules(conn)
+    conn.executescript(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_category_rules_identity
+            ON category_rules(match_kind, match_value, COALESCE(category_id, 0), COALESCE(tag, ''));
+
+        -- Tag rules add their tag to a book once; after that the tag is the
+        -- user's (removing it sticks), so each application is remembered.
+        CREATE TABLE IF NOT EXISTS tag_rule_applications (
+            rule_id INTEGER NOT NULL REFERENCES category_rules(id) ON DELETE CASCADE,
+            book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+            PRIMARY KEY(rule_id, book_id)
+        );
+        """
+    )
     suggestion_columns = {row["name"] for row in conn.execute("PRAGMA table_info(category_suggestions)")}
     if "proposed_by" not in suggestion_columns:
         # Who raised a suggestion: 'adso' for the rule engine, or the agent/tool
         # that proposed it (e.g. 'mcp'), shown to the reviewer.
         conn.execute("ALTER TABLE category_suggestions ADD COLUMN proposed_by TEXT")
+    # Shelves that match no genre are now proposed as tags, not new themes;
+    # open theme proposals from shelves are dropped so the next run re-asks.
+    conn.execute(
+        """
+        DELETE FROM category_suggestions
+        WHERE kind = 'map' AND match_kind = 'shelf' AND category_id IS NULL
+              AND proposed_facet = 'theme' AND status IN ('pending', 'superseded')
+        """
+    )
     seed_taxonomy(conn)
+
+
+def _migrate_tag_rules(conn: sqlite3.Connection) -> None:
+    """Let a rule target a tag instead of a category (catalogues from phase 1).
+
+    SQLite can't relax NOT NULL in place, so category_rules is rebuilt with a
+    nullable category_id and a tag column. Foreign keys are switched off for
+    the swap so dropping the old table can't cascade into book_categories.
+    """
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(category_rules)")}
+    if "tag" in columns:
+        return
+    conn.commit()
+    foreign_keys = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.executescript(
+            """
+            BEGIN;
+            CREATE TABLE category_rules_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                match_kind TEXT NOT NULL,
+                match_value TEXT NOT NULL,
+                category_id INTEGER REFERENCES categories(id) ON DELETE CASCADE,
+                tag TEXT,
+                created_by TEXT NOT NULL DEFAULT 'cli',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CHECK ((category_id IS NULL) != (tag IS NULL))
+            );
+            INSERT INTO category_rules_new (id, match_kind, match_value, category_id, created_by, created_at)
+                SELECT id, match_kind, match_value, category_id, created_by, created_at FROM category_rules;
+            DROP TABLE category_rules;
+            ALTER TABLE category_rules_new RENAME TO category_rules;
+            COMMIT;
+            """
+        )
+    finally:
+        conn.execute(f"PRAGMA foreign_keys = {'ON' if foreign_keys else 'OFF'}")
 
 
 def _sqlite_has_fts5(conn: sqlite3.Connection) -> bool:

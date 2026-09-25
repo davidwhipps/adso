@@ -956,6 +956,19 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
             f"#cat-{category_id}",
         )
 
+    @app.post("/taxonomy/{category_id}/unalias")
+    def taxonomy_unalias(
+        category_id: int, conn: sqlite3.Connection = Depends(get_conn), alias: str = Form(...)
+    ) -> RedirectResponse:
+        ref = _category_ref(conn, category_id)
+        return _taxonomy_action(
+            lambda: (
+                f"“{alias.strip()}” no longer matches {categorize_service.remove_alias(conn, ref, alias).label}; "
+                "open suggestions were re-checked."
+            ),
+            f"#cat-{category_id}",
+        )
+
     @app.post("/taxonomy/map")
     def taxonomy_map(
         conn: sqlite3.Connection = Depends(get_conn),
@@ -1132,7 +1145,12 @@ def create_app(db_path: str | Path, *, config: ResolvedConfig | None = None) -> 
                 except metadata_service.MetadataError:
                     context["metadata"] = None
                 # Apply the user's accepted category rules to new books (local only).
-                categorize_service.categorize(conn)
+                result = categorize_service.categorize(conn)
+                context["categories"] = {
+                    "assigned": result["assigned"],
+                    "tagged": result["tagged"],
+                    "pending": categorize_service.pending_card_count(conn),
+                }
             except Exception as exc:  # noqa: BLE001 - surface any parse/IO error to the user
                 context["error"] = f"Could not import that file: {exc}"
             finally:
