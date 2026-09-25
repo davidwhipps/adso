@@ -144,6 +144,10 @@ class WebCategoryTests(unittest.TestCase):
         self.conn.commit()
         cat.categorize(self.conn)
         self.assertIn("19th Century", self.client.get("/").text.split("Eras", 1)[1])
+        review = self.client.get("/review").text
+        self.assertIn('value="genre:Fantasy"', review)
+        self.assertNotIn('value="era:19th Century"', review)  # nothing maps to an era
+        self.assertIn("Era: 19th Century", self.client.get("/book/1").text)  # but a book can be given one
         shelf = self.client.get("/?gr_shelf=cozy-fantasy").text
         self.assertIn("Legends &amp; Lattes", shelf)
         self.assertNotIn("Leviathan Wakes", shelf)

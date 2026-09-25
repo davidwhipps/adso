@@ -123,6 +123,10 @@ _FACET_ORDER = {
 
 _EXAMPLE_TITLES = 3
 
+# Facets that shelves, subjects and tags never map to: era comes from the
+# original publication year, not from evidence.
+UNMAPPABLE_FACETS = frozenset({"era"})
+
 
 class CategoryError(AdsoError):
     """A category, rule or suggestion reference that can't be used."""
@@ -976,7 +980,7 @@ def add_rule(
     if not value:
         raise CategoryError(f"Nothing to match in {match_value!r}")
     tag = _tag_target(reference)
-    category_id = None if tag else Taxonomy(conn).resolve(reference).id
+    category_id = None if tag else _mapping_target(Taxonomy(conn), reference).id
     rule_id = _insert_rule(conn, match_kind, value, category_id, tag=tag, actor=actor)
     # A manual mapping answers any open proposal for the same value.
     conn.execute(
@@ -991,6 +995,17 @@ def add_rule(
     result = categorize(conn)
     rule = next(r for r in list_rules(conn) if r["id"] == rule_id)
     return {"rule_id": rule_id, "category": rule["category"], "books": rule["books"], "run": result}
+
+
+def _mapping_target(taxonomy: Taxonomy, reference: str) -> Category:
+    """The category a shelf, subject or tag may be mapped to."""
+    category = taxonomy.resolve(reference)
+    if category.facet in UNMAPPABLE_FACETS:
+        raise CategoryError(
+            f"{taxonomy.display(category.id)} comes from each book's publication year, so nothing maps to it",
+            hint="Map to a genre, tradition, theme, form or tag; set an era on one book with `adso edit`.",
+        )
+    return category
 
 
 def _insert_rule(
@@ -1541,7 +1556,7 @@ def _guess_category(
     ``None`` means "don't propose anything". A ``None`` category with a label
     means "propose tagging the books with the user's own shelf name".
     """
-    exact = taxonomy.match_term(value)
+    exact = [cid for cid in taxonomy.match_term(value) if taxonomy.get(cid).facet not in UNMAPPABLE_FACETS]
     if exact:
         return exact[0], CONFIDENCE_EXACT[kind], None
     if kind != "shelf":
@@ -1552,7 +1567,11 @@ def _guess_category(
     partial: set[int] = set()
     for size in (2, 1):
         for start in range(len(tokens) - size + 1):
-            partial.update(taxonomy.match_term(" ".join(tokens[start : start + size])))
+            partial.update(
+                cid
+                for cid in taxonomy.match_term(" ".join(tokens[start : start + size]))
+                if taxonomy.get(cid).facet not in UNMAPPABLE_FACETS
+            )
         if partial:
             break
     ranked = taxonomy._rank(partial)
@@ -2021,7 +2040,9 @@ def accept_suggestion(
             rule_ids,
         ).fetchone()[0]
         return {"kind": "map", "category": f"Tag: #{tag}", "books": books, "sources": len(members), "run": run}
-    if as_category:
+    if as_category and row["kind"] == "map":
+        category_id = _mapping_target(taxonomy, as_category).id
+    elif as_category:
         facet = "genre" if row["kind"] == "primary" else None
         category_id = taxonomy.resolve(as_category, facet=facet).id
     elif row["category_id"] is not None:
